@@ -82,15 +82,22 @@ translates it into the flat form. `tilesight gpu --file my_gpu.yaml [--out flat.
 
 ## 2. Workload config
 
-`gpuTilingPerfHWModel/interfaceAndRun/workload.py`, 34 fields, **one layer on one GPU**. The model tells the simulator:
+`gpuTilingPerfHWModel/interfaceAndRun/workload.py`, 37 fields, **one layer on one GPU**. The model tells the simulator:
 
 - attention: type (`mha` / `gqa` / `mla`), `impl` (`flash` / `naive`), head counts, Q/K/V dims
   (MLA: `q_lora_rank`, `kv_lora_rank`, `qk_nope`, `qk_rope`, `v_head`), causal, sliding window
 - FFN: `mlp` or sparse `moe` with `experts` (all of them resident — which are active is not
-  known), `topk` (the sparsity), `d_ff`, `shared_experts`
+  known), `topk` (the sparsity: only `topk` of `experts` are on the compute path, all of
+  `experts` are on the memory-footprint / on-chip-buffer path), `d_ff`, `shared_experts`
 - datatypes: weight, expert, activation, **KV cache**, compute, attention compute
-- run: phase, batch, `seq_len`, `max_seq_len` (the capacity question)
-- `layers`: how many layers of this kind this GPU holds
+- run: `phase` + `seq_len` (single-phase runs, `run_workload()`), `batch`, and the three
+  lengths `run_workload_both_phases()` (runs prefill and decode together) uses instead:
+  `prefill_seq_len` (the prompt), `cur_decoding_seq_len` (decode is always one token-generation
+  step — this is the KV length that step is taken at) and `max_seq_len` (the capacity
+  question — sizes the KV cache; `validate_workload()` requires `max_seq_len >
+  prefill_seq_len + cur_decoding_seq_len`, headroom for the sequence to keep generating past
+  where `cur_decoding_seq_len` currently samples it)
+- `layers`: how many layers of this kind this GPU holds (default 1)
 
 From the dims, dtypes, layer count and max sequence length alone,
 `memory_breakdown()` gives the footprint before any simulation:

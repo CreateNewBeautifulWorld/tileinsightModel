@@ -5,6 +5,8 @@
   python -m tilesight.cli.cli sweep --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --param memory.ddr.bandwidth_TBps --values 4,6,8,12,16
   python -m tilesight.cli.cli need  --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --param memory.ddr.bandwidth_TBps --target-ms 20
   python -m tilesight.cli.cli dump-model --model kimi_k2.hf      # editable block-level YAML
+  python -m tilesight.cli.cli workload --file wl.yaml --gpu-tiling-perf-hw-model b300
+                                                                   # prefill + decode, writes out/prefill/, out/decode/
   python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000   # web UI; computation stays on this machine
 """
 from __future__ import annotations
@@ -107,6 +109,11 @@ def main(argv=None):
     cp2.add_argument("--md", help="write the reference as markdown")
     cp2.add_argument("--csv", help="write the reference as CSV")
     cp2.add_argument("--workload", action="store_true", help="list the workload fields instead")
+
+    wp = sub.add_parser("workload", help="run a workload's prefill + decode phases, write results to out/")
+    wp.add_argument("--file", required=True, help="workload YAML")
+    wp.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
+    wp.add_argument("--out", help="output dir (default: gpuTilingPerfHWModel/out/)")
 
     ap2 = sub.add_parser("addrmap", help="dump the address -> L2 slice / HBM port mapping")
     ap2.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
@@ -269,6 +276,23 @@ def main(argv=None):
                   f"calib={sum(1 for f in FIELDS if f.tag == 'calib')} "
                   f"policy={sum(1 for f in FIELDS if f.tag == 'policy')} "
                   f"loss={sum(1 for f in FIELDS if f.tag == 'loss')}")
+        return
+    if a.cmd == "workload":
+        from pathlib import Path
+
+        from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import run_workload_both_phases
+        wl = yaml.safe_load(open(a.file))
+        cur_gpu_config = HardwareSpec.load(a.cur_gpu_config)
+        reps = run_workload_both_phases(wl, cur_gpu_config)
+        out_root = Path(a.out) if a.out else Path(__file__).parent.parent / "gpuTilingPerfHWModel" / "out"
+        for phase, rep in reps.items():
+            d = out_root / phase
+            d.mkdir(parents=True, exist_ok=True)
+            summary = model_summary(rep)
+            (d / "summary.txt").write_text(summary)
+            print(f"=== {phase} ===")
+            print(summary)
+            print(f"-> {d / 'summary.txt'}\n")
         return
     if a.cmd == "addrmap":
         from tilesight.gpuTilingPerfHWModel.genResult.addressing import AddressMap

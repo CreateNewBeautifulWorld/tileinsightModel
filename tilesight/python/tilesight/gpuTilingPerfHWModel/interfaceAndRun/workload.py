@@ -8,13 +8,18 @@ op is a GPU-side modelling choice, not a property of the workload — it lives i
 
 Like gpuTilingPerfHWModel/schema.py, this file is the single source of what a workload may contain. Fields:
   attention : type (mha | gqa | mla), head counts and dims, sequence, batch, causal/window, impl
-  ffn       : dense MLP or MoE (experts, top-k, shared experts, expert FFN width)
+  ffn       : dense MLP or MoE (experts, top-k, shared experts, expert FFN width — sparsity is
+              topk/experts: ALL experts are resident weight-wise, only topk are on the compute path)
   dtypes    : weight / activation / KV / compute / expert
-  run       : phase (decode | prefill), batch, sequence length
+  run       : phase (decode | prefill) for a single-phase run, batch, and the three sequence
+              lengths a request-serving GPU actually cares about — prefill_seq_len (prompt),
+              cur_decoding_seq_len (KV length right now) and max_seq_len (the longest this GPU
+              must ever hold KV for — sizes the KV cache, run_workload_both_phases() enforces
+              max_seq_len > prefill_seq_len + cur_decoding_seq_len)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES
 
@@ -66,11 +71,22 @@ WORKLOAD_FIELDS: tuple[WField, ...] = (
     W("dtypes.compute", "str", "", "fp8", "dtypes", "Tensor-core datapath for the linears"),
     W("dtypes.attn_compute", "str", "", "bf16", "dtypes", "Tensor-core datapath inside attention"),
 
-    W("run.phase", "str", "", "decode", "run", "decode (1 token/sequence) | prefill (seq tokens)"),
+    W("run.phase", "str", "", "decode", "run",
+      "decode (1 token/sequence) | prefill (seq tokens); only used for a single-phase run "
+      "(run_workload()) — run_workload_both_phases() ignores this and runs both"),
     W("run.batch", "int", "sequences", 32, "run", "Sequences resident on this GPU"),
-    W("run.seq_len", "int", "tokens", 8192, "run", "KV length (decode) or prompt length (prefill)"),
-    W("run.max_seq_len", "int", "tokens", 0, "run",
-      "Longest sequence this GPU must hold KV for (0 = seq_len). Only affects the capacity question"),
+    W("run.seq_len", "int", "tokens", 8192, "run",
+      "KV length (decode) or prompt length (prefill); only used for a single-phase run"),
+    W("run.prefill_seq_len", "int", "tokens", 4096, "run",
+      "Prompt length for the prefill-phase run in run_workload_both_phases()"),
+    W("run.cur_decoding_seq_len", "int", "tokens", 8192, "run",
+      "KV length for the decode-phase run in run_workload_both_phases() — decode always models "
+      "ONE token-generation step at a given KV length, so this is where that step is taken"),
+    W("run.max_seq_len", "int", "tokens", 16384, "run",
+      "The longest sequence this GPU must hold KV for — sizes the KV cache (see memory_breakdown()"
+      " and the run.max_seq_len > run.prefill_seq_len + run.cur_decoding_seq_len check in "
+      "validate_workload()). Headroom beyond prefill+cur_decoding: room for the sequence to keep "
+      "generating past where cur_decoding_seq_len currently samples it."),
 )
 
 W_BY_PATH = {f.path: f for f in WORKLOAD_FIELDS}
@@ -118,6 +134,12 @@ def validate_workload(cfg: dict) -> list[str]:
         h, kv = get(cfg, "attention.heads"), get(cfg, "attention.kv_heads") or get(cfg, "attention.heads")
         if h % max(1, kv):
             problems.append(f"attention.heads ({h}) must be a multiple of kv_heads ({kv})")
+    pfx = int(get(cfg, "run.prefill_seq_len"))
+    cds = int(get(cfg, "run.cur_decoding_seq_len"))
+    mx = int(get(cfg, "run.max_seq_len"))
+    if mx <= pfx + cds:
+        problems.append(f"run.max_seq_len ({mx}) must be greater than run.prefill_seq_len + "
+                        f"run.cur_decoding_seq_len ({pfx} + {cds} = {pfx + cds})")
     return problems
 
 
@@ -179,14 +201,43 @@ def run_workload(cfg: dict, cur_gpu_config, progress=None):
     return run(cur_gpu_config, cur_model_config, progress=progress)
 
 
-def memory_breakdown(cfg: dict) -> dict:
+def run_workload_both_phases(cfg: dict, cur_gpu_config, progress=None) -> dict:
+    """Evaluate the workload's prefill and decode phases in one call.
+
+    prefill runs at run.prefill_seq_len (the prompt); decode runs at run.cur_decoding_seq_len
+    (one token-generation step at that KV length — decode is always a single step, so this is
+    where that step is taken). Ignores run.phase/run.seq_len entirely — those are for
+    run_workload()'s single-phase path. Raises ValueError (via validate_workload(), which
+    includes the run.max_seq_len > prefill_seq_len + cur_decoding_seq_len check) if cfg is
+    invalid. Returns {"prefill": ModelReport, "decode": ModelReport}."""
+    problems = validate_workload(cfg)
+    if problems:
+        raise ValueError("; ".join(problems))
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.runner import CurModelConfig, run
+    model_spec = to_model_spec(cfg)
+    base_rc = to_run_config(cfg)
+    prefill_rc = replace(base_rc, phase="prefill", seq_len=int(get(cfg, "run.prefill_seq_len")))
+    decode_rc = replace(base_rc, phase="decode", seq_len=int(get(cfg, "run.cur_decoding_seq_len")))
+    rep_prefill = run(cur_gpu_config, CurModelConfig(spec=model_spec, run=prefill_rc), progress=progress)
+    rep_decode = run(cur_gpu_config, CurModelConfig(spec=model_spec, run=decode_rc), progress=progress)
+    return {"prefill": rep_prefill, "decode": rep_decode}
+
+
+def memory_breakdown(cfg: dict, cur_gpu_config=None) -> dict:
     """What the dimensions and datatypes imply for memory, before anything is simulated.
 
     weights: attention (q_a/q_b or q+kv_a, kv_b, o) + routed experts (ALL of them are resident;
-    which ones are active is not known ahead of time) + shared experts, x layers.
+    which ones are active is not known ahead of time — sparsity, run.ffn.topk / run.ffn.experts,
+    only narrows what's on the compute path, never what's resident) + shared experts, x layers.
     KV cache: MLA stores the latent (kv_lora + rope) per token per layer; GQA/MHA store
-    kv_heads x (head_dim + v_head_dim).
-    """
+    kv_heads x (head_dim + v_head_dim). Sized by run.max_seq_len (the "typical max" a request
+    might reach), not run.seq_len — that's the whole point of keeping it separate from wherever
+    the run currently samples a request (run.cur_decoding_seq_len).
+
+    Pass `cur_gpu_config` to also check whether that KV cache actually fits in the on-chip
+    buffer (compute.tile_policy sizing assumes it does — every KV read hits the buffer,
+    0 misses to DDR — see kernels/attention.py's resident_frac()); the model always simulates
+    correctly either way, this is just a heads-up when the assumption doesn't hold."""
     D = get(cfg, "hidden")
     L = int(get(cfg, "layers"))
     wb, eb, kvb = (DTYPE_BYTES[get(cfg, f"dtypes.{k}")] for k in ("weight", "expert", "kv"))
@@ -218,20 +269,26 @@ def memory_breakdown(cfg: dict) -> dict:
 
     seq = int(get(cfg, "run.max_seq_len") or get(cfg, "run.seq_len"))
     batch = int(get(cfg, "run.batch"))
-    return {
+    kv_cache_GB = kv_per_token * L * seq * batch / 1e9
+    out = {
         "layers": L,
         "attention_weights_GB": attn_params * wb * L / 1e9,
         "expert_weights_GB": expert_bytes * L / 1e9,
         "dense_weights_GB": (dense_bytes + router) * L / 1e9,
         "weights_GB": (attn_params * wb + expert_bytes + dense_bytes + router) * L / 1e9,
         "kv_bytes_per_token_per_layer": kv_per_token,
-        "kv_cache_GB": kv_per_token * L * seq * batch / 1e9,
+        "kv_cache_GB": kv_cache_GB,
         "kv_seq_len": seq, "batch": batch,
         "sparsity": f"{topk}/{experts} experts per token" if ff == "moe" else "dense",
         "active_expert_bytes_per_token_GB": per_expert * topk * eb / 1e9 if ff == "moe" else 0.0,
         "total_GB": ((attn_params * wb + expert_bytes + dense_bytes + router) * L
                      + kv_per_token * L * seq * batch) / 1e9,
     }
+    if cur_gpu_config is not None:
+        kv_buf_GB = cur_gpu_config.sram_capacity_for("kv") / 1e9
+        out["on_chip_buffer_kv_capacity_GB"] = kv_buf_GB
+        out["kv_fits_on_chip_buffer"] = kv_buf_GB >= kv_cache_GB
+    return out
 
 
 def compare_attention_impl(cfg: dict, cur_gpu_config) -> dict:

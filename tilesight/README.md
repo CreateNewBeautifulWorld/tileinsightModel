@@ -78,8 +78,12 @@ model only ever sees config.
    up/down read/write bandwidth. `derive()` gives TFLOP/s per tensor core and per shader core,
    whole-GPU PFLOP/s and every aggregate bandwidth; `to_hardware_spec()` translates it into the
    flat form. `tilesight gpu --file my_gpu.yaml --workload wl.yaml`.
-2. **Workload config** — `gpuTilingPerfHWModel/interfaceAndRun/workload.py`, 34 fields: one layer on one GPU (attention type and
-   dims, FFN/MoE, datatypes, phase/batch/seq). `tilesight config --workload`.
+2. **Workload config** — `gpuTilingPerfHWModel/interfaceAndRun/workload.py`, 37 fields: one layer on one GPU (attention type and
+   dims, FFN/MoE, datatypes, phase/batch/seq/prefill_seq_len/cur_decoding_seq_len/max_seq_len).
+   `tilesight config --workload`. `run_workload_both_phases()` runs prefill (at
+   `prefill_seq_len`) and decode (one token-generation step at `cur_decoding_seq_len`) together
+   from one config — `tilesight workload --file wl.yaml --gpu-tiling-perf-hw-model b300` writes
+   each phase's summary to `gpuTilingPerfHWModel/out/prefill/` and `.../out/decode/`.
 3. **Tile policy** — part of the GPU config, not the workload (`gpuTilingPerfHWModel/interfaceAndRun/schema.py`'s
    `compute.tile_policy.gemm`/`.attn`/`.overrides`): `auto` or a fixed tile. It's a modelling
    choice about how *this part* executes a GEMM/attention op, independent of which model runs on it.

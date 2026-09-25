@@ -334,7 +334,7 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
             rep = run_workload(wl, cur_gpu_config, progress=prog)
             out = _model_json(rep)
             out["workload"] = wl
-            out["workload_memory"] = memory_breakdown(wl)
+            out["workload_memory"] = memory_breakdown(wl, cur_gpu_config)
             out["by_block"] = {k: v / rep.step_time_s for k, v in rep.by_domain().items()}
             out["activity_by_block"] = rep.activity_by_domain()
             if cfg.get("compare_attention"):

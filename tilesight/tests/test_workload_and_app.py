@@ -8,8 +8,8 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from tilesight import HardwareSpec
-from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import (WORKLOAD_FIELDS, run_workload, to_run_config,
-                                      validate_workload)
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import (WORKLOAD_FIELDS, memory_breakdown, run_workload,
+                                      run_workload_both_phases, to_run_config, validate_workload)
 from tilesight.gpuTilingPerfHWModel.genResult.archdiagram import arch_svg
 from tilesight.cli.server import Handler
 
@@ -172,6 +172,11 @@ def test_kimi_k3_preset_memory_matches_the_simulation():
     import yaml
     from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import memory_breakdown
     cfg = yaml.safe_load(open("python/tilesight/modelPresets/kimi_k3_10L.yaml"))
+    # max_seq_len sizes the KV cache independently of the seq_len an actual run samples at
+    # (that's the point — see workload.py's memory_breakdown()); run this comparison AT
+    # max_seq_len so it stays a check of the KV-bytes formula, not of the two knobs' (deliberately)
+    # different defaults.
+    cfg["run"]["seq_len"] = cfg["run"]["max_seq_len"] = 16384
     assert validate_workload(cfg) == []
     m = memory_breakdown(cfg)
     assert m["layers"] == 10 and "16/112" in m["sparsity"]
@@ -179,6 +184,46 @@ def test_kimi_k3_preset_memory_matches_the_simulation():
     rep = run_workload(cfg, HW)
     assert abs(m["weights_GB"] - rep.memory.weights_GB) / rep.memory.weights_GB < 0.05
     assert abs(m["kv_cache_GB"] - rep.memory.kv_cache_GB) / rep.memory.kv_cache_GB < 0.05
+
+
+def test_max_seq_len_must_exceed_prefill_plus_decoding():
+    ok = {**WL, "run": {**WL["run"], "prefill_seq_len": 4096, "cur_decoding_seq_len": 8192,
+                        "max_seq_len": 16384}}
+    assert validate_workload(ok) == []
+    too_small = {**WL, "run": {**WL["run"], "prefill_seq_len": 4096, "cur_decoding_seq_len": 8192,
+                               "max_seq_len": 12288}}          # exactly equal, not greater
+    problems = validate_workload(too_small)
+    assert len(problems) == 1 and "max_seq_len" in problems[0]
+
+
+def test_run_workload_both_phases_runs_prefill_and_decode_at_the_given_lengths():
+    cfg = {**WL, "run": {**WL["run"], "prefill_seq_len": 2048, "cur_decoding_seq_len": 6000,
+                         "max_seq_len": 16384}}
+    reps = run_workload_both_phases(cfg, HW)
+    assert reps["prefill"].rc.phase == "prefill" and reps["prefill"].rc.seq_len == 2048
+    assert reps["decode"].rc.phase == "decode" and reps["decode"].rc.seq_len == 6000
+    # decode-at-a-length is a single token step: far cheaper than prefilling the whole prompt
+    assert reps["decode"].step_time_s < reps["prefill"].step_time_s
+
+
+def test_run_workload_both_phases_rejects_an_invalid_config():
+    bad = {**WL, "run": {**WL["run"], "prefill_seq_len": 8192, "cur_decoding_seq_len": 8192,
+                         "max_seq_len": 8192}}
+    with pytest.raises(ValueError, match="max_seq_len"):
+        run_workload_both_phases(bad, HW)
+
+
+def test_memory_breakdown_reports_on_chip_buffer_kv_fit_when_given_hw():
+    cfg = {**WL, "run": {**WL["run"], "prefill_seq_len": 4096, "cur_decoding_seq_len": 8192,
+                         "max_seq_len": 16384}}
+    plain = memory_breakdown(cfg)
+    assert "kv_fits_on_chip_buffer" not in plain              # no cur_gpu_config -> no opinion
+    with_hw = memory_breakdown(cfg, HW)
+    assert "kv_fits_on_chip_buffer" in with_hw and "on_chip_buffer_kv_capacity_GB" in with_hw
+    # an on-chip buffer big enough for this workload's whole KV cache -> the assumption holds
+    big_buffer = HW.override({"memory.sram.capacity_MB": with_hw["kv_cache_GB"] * 1024 * 2,
+                              "memory.sram.alloc": {"kv": 1.0}})
+    assert memory_breakdown(cfg, big_buffer)["kv_fits_on_chip_buffer"]
 
 
 def test_derive_endpoint_and_slice_job(url):
