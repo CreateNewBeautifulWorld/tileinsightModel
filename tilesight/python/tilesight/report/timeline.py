@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 
 from ..engine.reference import _longest_path, _node_w, _u
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 from ..ir.kernel import Kernel
 
 

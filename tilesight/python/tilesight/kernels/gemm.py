@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 
-from ..gpuTilingHWModel.spec import DTYPE_BYTES, HardwareSpec
+from ..gpuTilingPerfHWModel.spec import DTYPE_BYTES, HardwareSpec
 from ..ir.kernel import Action, Kernel
 from ..engine import backend
 from .tiles import TileConfig, parse_path_split

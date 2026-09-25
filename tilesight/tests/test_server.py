@@ -48,7 +48,7 @@ def test_options(url):
 
 
 def test_run_job_reports_progress_and_result(url):
-    cfg = {"model": "kimi_k2.hf", "gpuTilingHWModel": "b300",
+    cfg = {"model": "kimi_k2.hf", "gpuTilingPerfHWModel": "b300",
            "run": {"phase": "decode", "batch": 64, "seq_len": 4096, "dp": 8}}
     j, states = _post(url, "run", cfg)
     assert j["state"] == "done"
@@ -60,7 +60,7 @@ def test_run_job_reports_progress_and_result(url):
 
 
 def test_hw_override_and_request_mode(url):
-    cfg = {"model": "kimi_k2.hf", "gpuTilingHWModel": "b300", "gpuTilingHWModelOverrides": '{"memory.ddr.bandwidth_TBps": 16}',
+    cfg = {"model": "kimi_k2.hf", "gpuTilingPerfHWModel": "b300", "gpuTilingPerfHWModelOverrides": '{"memory.ddr.bandwidth_TBps": 16}',
            "run": {"batch": 64, "dp": 8, "prompt_len": 2048, "output_len": 512,
                    "prefill_batch": 8, "decode_samples": 3}}
     j, _ = _post(url, "request", cfg)
@@ -85,7 +85,7 @@ layers:
       - {type: norm}
       - {type: mlp, d_ff: 8192}
 """
-    cfg = {"model_yaml": yaml_text, "gpuTilingHWModel": "h200",
+    cfg = {"model_yaml": yaml_text, "gpuTilingPerfHWModel": "h200",
            "run": {"phase": "decode", "batch": 8, "seq_len": 2048, "tp": 1, "dp": 1},
            "sweep": {"param": "memory.ddr.bandwidth_TBps", "values": "2,4,8", "link_l2": False}}
     j, _ = _post(url, "sweep", cfg)
@@ -95,12 +95,12 @@ layers:
 
 
 def test_bad_config_reports_error(url):
-    j, _ = _post(url, "run", {"model": "nope.hf", "gpuTilingHWModel": "b300", "run": {}})
+    j, _ = _post(url, "run", {"model": "nope.hf", "gpuTilingPerfHWModel": "b300", "run": {}})
     assert j["state"] == "error" and j["error"]
 
 
 def test_kernel_mode_single_gpu(url):
-    cfg = {"gpuTilingHWModel": "b300", "kernel": {"kernel": "gemm", "M": 4096, "N": 4096, "K": 7168,
+    cfg = {"gpuTilingPerfHWModel": "b300", "kernel": {"kernel": "gemm", "M": 4096, "N": 4096, "K": 7168,
                                      "a_dtype": "fp8", "b_dtype": "fp8", "compute_dtype": "fp8",
                                      "tile": "auto"}}
     j, _ = _post(url, "kernel", cfg)
@@ -116,8 +116,8 @@ def test_kernel_mode_single_gpu(url):
 
 def test_kernel_mode_fixed_tile_is_slower_than_search(url):
     base = {"kernel": "gemm", "M": 4096, "N": 4096, "K": 7168, "compute_dtype": "fp8"}
-    auto, _ = _post(url, "kernel", {"gpuTilingHWModel": "b300", "kernel": {**base, "tile": "auto"}})
-    fixed, _ = _post(url, "kernel", {"gpuTilingHWModel": "b300",
+    auto, _ = _post(url, "kernel", {"gpuTilingPerfHWModel": "b300", "kernel": {**base, "tile": "auto"}})
+    fixed, _ = _post(url, "kernel", {"gpuTilingPerfHWModel": "b300",
                                      "kernel": {**base, "tile": '{"bm":64,"bn":64,"bk":64}'}})
     assert fixed["result"]["tried"] == 1
     assert fixed["result"]["best"]["time_us"] > auto["result"]["best"]["time_us"]
@@ -126,15 +126,15 @@ def test_kernel_mode_fixed_tile_is_slower_than_search(url):
 def test_kernel_mode_attention_and_hw_override(url):
     k = {"kernel": "attn_decode", "B": 32, "H": 64, "kv_heads": 1, "S": 8192,
          "d_qk": 576, "d_v": 512, "v_in_k": True, "tile": "auto"}
-    slow, _ = _post(url, "kernel", {"gpuTilingHWModel": "b300", "kernel": k,
-                                    "gpuTilingHWModelOverrides": '{"memory.ddr.bandwidth_TBps": 4}'})
-    fast, _ = _post(url, "kernel", {"gpuTilingHWModel": "b300", "kernel": k})
+    slow, _ = _post(url, "kernel", {"gpuTilingPerfHWModel": "b300", "kernel": k,
+                                    "gpuTilingPerfHWModelOverrides": '{"memory.ddr.bandwidth_TBps": 4}'})
+    fast, _ = _post(url, "kernel", {"gpuTilingPerfHWModel": "b300", "kernel": k})
     assert slow["result"]["best"]["bound"].startswith("ddr:")
     assert fast["result"]["best"]["time_us"] < slow["result"]["best"]["time_us"]
 
 
 def test_cycle_csv_endpoint(url):
-    cfg = {"gpuTilingHWModel": "b300", "kernel": {"kernel": "gemm", "M": 2048, "N": 2048, "K": 4096,
+    cfg = {"gpuTilingPerfHWModel": "b300", "kernel": {"kernel": "gemm", "M": 2048, "N": 2048, "K": 4096,
                                      "compute_dtype": "fp8", "tile": "auto"}}
     req = urllib.request.Request(url + "/api/jobs", method="POST",
                                  data=json.dumps({"mode": "kernel", "config": cfg}).encode(),

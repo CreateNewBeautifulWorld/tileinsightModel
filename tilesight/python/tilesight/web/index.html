@@ -82,7 +82,7 @@
     </select>
 
     <label>Hardware (single GPU)</label>
-    <select id="gpuTilingHWModel"></select>
+    <select id="gpuTilingPerfHWModel"></select>
 
     <div id="kernelfields" style="display:none">
       <label>Kernel</label>
@@ -163,7 +163,7 @@
     </details>
     <details>
       <summary>Hardware overrides (JSON, dotted paths)</summary>
-      <textarea id="gpuTilingHWModelOverrides" placeholder='{"memory.ddr.bandwidth_TBps": 12, "sms": 160}'></textarea>
+      <textarea id="gpuTilingPerfHWModelOverrides" placeholder='{"memory.ddr.bandwidth_TBps": 12, "sms": 160}'></textarea>
     </details>
 
     <button class="run" id="go">Run</button>
@@ -193,7 +193,7 @@ async function init(){
   const r = await fetch(API + "/api/options");
   OPTS = await r.json();
   $("model").innerHTML = OPTS.models.map(m=>`<option${m.includes("kimi")?" selected":""}>${m}</option>`).join("");
-  $("gpuTilingHWModel").innerHTML = OPTS.hardware.map(h=>`<option${h==="b300"?" selected":""}>${h}</option>`).join("");
+  $("gpuTilingPerfHWModel").innerHTML = OPTS.hardware.map(h=>`<option${h==="b300"?" selected":""}>${h}</option>`).join("");
   $("sweep_param").innerHTML = OPTS.sweep_params.map(p=>`<option>${p}</option>`).join("");
   $("backend").textContent = "server";
   syncMode();
@@ -244,8 +244,8 @@ function collect(){
     const kind = $("kernel").value, k = {kernel: kind, tile: $("ktile").value || "auto"};
     KFIELDS[kind].forEach(([id])=>{ const el=$("k_"+id); if(!el) return;
       k[id] = (el.value==="true") ? true : (el.value==="false" ? false : el.value); });
-    return { gpuTilingHWModel: $("gpuTilingHWModel").value, kernel: k,
-             gpuTilingHWModelOverrides: $("gpuTilingHWModelOverrides").value.trim() || null };
+    return { gpuTilingPerfHWModel: $("gpuTilingPerfHWModel").value, kernel: k,
+             gpuTilingPerfHWModelOverrides: $("gpuTilingPerfHWModelOverrides").value.trim() || null };
   }
   const run = {
     phase: $("phase").value, batch: num("batch"), seq_len: num("seq_len"),
@@ -261,8 +261,8 @@ function collect(){
     run.prompt_len = num("prompt_len"); run.output_len = num("output_len");
     run.prefill_batch = num("prefill_batch");
   }
-  const cfg = { model: $("model").value, gpuTilingHWModel: $("gpuTilingHWModel").value, run,
-                model_yaml: $("model_yaml").value, gpuTilingHWModelOverrides: $("gpuTilingHWModelOverrides").value.trim() || null };
+  const cfg = { model: $("model").value, gpuTilingPerfHWModel: $("gpuTilingPerfHWModel").value, run,
+                model_yaml: $("model_yaml").value, gpuTilingPerfHWModelOverrides: $("gpuTilingPerfHWModelOverrides").value.trim() || null };
   if ($("mode").value === "sweep" || $("mode").value === "need"){
     cfg.sweep = { param: $("sweep_param").value, values: $("sweep_values").value,
                   link_l2: $("link_l2").checked, target_ms: Number($("target_ms").value||25) };

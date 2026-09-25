@@ -15,7 +15,7 @@ import html
 import json
 
 from ..engine import backend
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 from ..ir.kernel import Kernel
 from .timeline import steady_timeline
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 from ..ir.kernel import Kernel
 
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from itertools import product
 
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 from ..model.run_config import RunConfig
 from ..model.runner import run_model
 from ..model.spec import ModelSpec

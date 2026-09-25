@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import html
 
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 
 C_SM, C_L1, C_L2, C_BUF, C_DMA, C_HBM = "#b4552d", "#5b9279", "#4f7cac", "#7f9a52", "#9a8f7a", "#b3563a"
 

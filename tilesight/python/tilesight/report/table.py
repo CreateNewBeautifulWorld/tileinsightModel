@@ -19,7 +19,7 @@ RESOURCE_CLASS = {
 
 def domain_of(detail: str) -> str:
     """Which of the model's three blocks a limiter belongs to."""
-    from ..gpuTilingHWModel.spec import lane_domain
+    from ..gpuTilingPerfHWModel.spec import lane_domain
     head = detail.split(":", 1)[0]
     if head == "latency":
         inner = detail[detail.rfind("(") + 1: -1] if detail.endswith(")") else ""

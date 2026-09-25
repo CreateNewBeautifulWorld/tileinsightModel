@@ -368,7 +368,7 @@ def test_lossless_mode_turns_every_modelled_loss_off():
 def test_config_is_the_only_interface_between_gpu_and_model():
     import pathlib
     import re
-    from tilesight.gpuTilingHWModel import schema
+    from tilesight.gpuTilingPerfHWModel import schema
     # 1. every shipped preset validates against the schema
     for name in ("b300", "b200", "h200", "mi300x", "mi325x", "mi355x", "mi450"):
         assert HardwareSpec.load(name).validate() == [], name

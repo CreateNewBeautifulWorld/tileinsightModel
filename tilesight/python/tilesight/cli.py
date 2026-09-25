@@ -1,9 +1,9 @@
 """CLI.
 
-  python -m tilesight.cli run   --model kimi_k2.hf --gpu-tiling-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8
-  python -m tilesight.cli request --model kimi_k2.hf --gpu-tiling-hw-model b300 --batch 256 --dp 8 --prompt 8192 --output 4096
-  python -m tilesight.cli sweep --model kimi_k2.hf --gpu-tiling-hw-model b300 --param memory.ddr.bandwidth_TBps --values 4,6,8,12,16
-  python -m tilesight.cli need  --model kimi_k2.hf --gpu-tiling-hw-model b300 --param memory.ddr.bandwidth_TBps --target-ms 20
+  python -m tilesight.cli run   --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8
+  python -m tilesight.cli request --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --batch 256 --dp 8 --prompt 8192 --output 4096
+  python -m tilesight.cli sweep --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --param memory.ddr.bandwidth_TBps --values 4,6,8,12,16
+  python -m tilesight.cli need  --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --param memory.ddr.bandwidth_TBps --target-ms 20
   python -m tilesight.cli dump-model --model kimi_k2.hf      # editable block-level YAML
   python -m tilesight.cli serve --host 0.0.0.0 --port 8000   # web UI; computation stays on this machine
 """
@@ -55,7 +55,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     bp = sub.add_parser("buffer", help="size and configure an extra on-chip shared buffer")
     bp.add_argument("--model", required=True)
-    bp.add_argument("--gpu-tiling-hw-model", dest="cur_gpu_config", default="b300")
+    bp.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
     bp.add_argument("--run-config", dest="run_config")
     bp.add_argument("--phase", default="decode")
     bp.add_argument("--batch", type=int, default=256)
@@ -69,7 +69,7 @@ def main(argv=None):
     bp.add_argument("--csv")
 
     kp = sub.add_parser("kernel", help="single-GPU kernel study (tile ranking + Figure-3e timeline)")
-    kp.add_argument("--gpu-tiling-hw-model", dest="cur_gpu_config", default="b300")
+    kp.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
     kp.add_argument("--kernel", default="gemm",
                     choices=["gemm", "grouped_gemm", "attn_decode", "attn_prefill", "elementwise"])
     kp.add_argument("--shape", required=True, help='JSON, e.g. \'{"M":4096,"N":4096,"K":7168}\'')
@@ -109,7 +109,7 @@ def main(argv=None):
     cp2.add_argument("--workload", action="store_true", help="list the workload fields instead")
 
     ap2 = sub.add_parser("addrmap", help="dump the address -> L2 slice / HBM port mapping")
-    ap2.add_argument("--gpu-tiling-hw-model", dest="cur_gpu_config", default="b300")
+    ap2.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
     ap2.add_argument("--set", action="append", help="override, e.g. memory.addressing.l2.mode=hash")
     ap2.add_argument("--rows", type=int, default=8)
     ap2.add_argument("--base", default="0x0")
@@ -119,7 +119,7 @@ def main(argv=None):
 
     mp = sub.add_parser("memmap", help="per-GPU memory map: base address of every tensor")
     mp.add_argument("--model", required=True)
-    mp.add_argument("--gpu-tiling-hw-model", dest="cur_gpu_config", default="b300")
+    mp.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
     mp.add_argument("--phase", default="decode")
     mp.add_argument("--batch", type=int, default=256)
     mp.add_argument("--seq", type=int, default=8192)
@@ -136,7 +136,7 @@ def main(argv=None):
     for name in ("run", "request", "sweep", "need", "dump-model"):
         p = sub.add_parser(name)
         p.add_argument("--model", required=True)
-        p.add_argument("--gpu-tiling-hw-model", dest="cur_gpu_config", default="b300")
+        p.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
         p.add_argument("--run-config")
         p.add_argument("--phase")
         p.add_argument("--batch", type=int)
@@ -170,7 +170,7 @@ def main(argv=None):
         from .server import serve
         return serve(a.host, a.port)
     if a.cmd == "gpu":
-        from .gpuTilingHWModel.slice_config import (SLICE_FIELDS, as_markdown as s_md, derive,
+        from .gpuTilingPerfHWModel.slice_config import (SLICE_FIELDS, as_markdown as s_md, derive,
                                       to_hardware_spec, validate_slice_config)
         if a.md:
             open(a.md, "w").write(s_md())
@@ -226,7 +226,7 @@ def main(argv=None):
             del _json
         return
     if a.cmd == "config":
-        from .gpuTilingHWModel.schema import FIELDS, SECTIONS, as_csv, as_markdown, _Required
+        from .gpuTilingPerfHWModel.schema import FIELDS, SECTIONS, as_csv, as_markdown, _Required
         if a.validate:
             cur_gpu_config = HardwareSpec.load(a.validate)
             probs = cur_gpu_config.validate()
@@ -373,7 +373,7 @@ def main(argv=None):
         print()
         addr_fn = None
         if a.kernel in ("gemm", "grouped_gemm"):
-            from .gpuTilingHWModel.spec import DTYPE_BYTES as _DT
+            from .gpuTilingPerfHWModel.spec import DTYPE_BYTES as _DT
             from .kernels.tiles import TileConfig as _TC
             from .report.addressing import kernel_addr_fn
             _sh = json.loads(a.shape)
@@ -405,7 +405,7 @@ def main(argv=None):
                 f.write(txt + "\n")
             print(f"\ntrace written to {a.trace_out} ({len(txt.splitlines())} lines)")
         if a.addr and a.kernel in ("gemm", "grouped_gemm"):
-            from .gpuTilingHWModel.spec import DTYPE_BYTES
+            from .gpuTilingPerfHWModel.spec import DTYPE_BYTES
             from .kernels.tiles import TileConfig
             from .report.addressing import analyze_gemm
             sh = json.loads(a.shape)
@@ -451,7 +451,7 @@ def main(argv=None):
         print(model.dump_yaml())
         return
     # The two configs the model actually takes: cur_gpu_config (what the part is, incl. how it
-    # tiles) and cur_model_config (what runs on it). --model/--gpu-tiling-hw-model/--run-config/--set/--tile just
+    # tiles) and cur_model_config (what runs on it). --model/--gpu-tiling-perf-hw-model/--run-config/--set/--tile just
     # pick how they're built here at the CLI boundary.
     cur_gpu_config = _cur_gpu_config(a)
     cur_model_config = CurModelConfig(spec=model, run=_rc(a))

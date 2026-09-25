@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 
 from ..engine import backend
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 from ..ir.kernel import Kernel, KernelResult
 from ..kernels import comm
 from ..kernels.attention import lower_attention_decode, lower_attention_prefill
@@ -153,7 +153,7 @@ class ModelReport:
         there. This one sums how long every lane is busy, which is what you want when asking
         "is the on-chip buffer actually doing work".
         """
-        from ..gpuTilingHWModel.spec import lane_domain
+        from ..gpuTilingPerfHWModel.spec import lane_domain
         out: dict[str, float] = {}
         for o in self.ops:
             for k in o.kernels:

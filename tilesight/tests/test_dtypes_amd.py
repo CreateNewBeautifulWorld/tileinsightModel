@@ -2,7 +2,7 @@
 import pytest
 
 from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.gpuTilingHWModel.spec import DTYPE_BYTES
+from tilesight.gpuTilingPerfHWModel.spec import DTYPE_BYTES
 from tilesight.kernels.gemm import lower_gemm
 from tilesight.kernels.tiles import TileConfig
 from tilesight.server import _kernel_candidates

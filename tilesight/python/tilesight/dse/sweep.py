@@ -12,7 +12,7 @@ import csv
 import io
 from typing import Callable
 
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 from ..model.run_config import RunConfig
 from ..model.runner import run_model
 from ..model.spec import ModelSpec

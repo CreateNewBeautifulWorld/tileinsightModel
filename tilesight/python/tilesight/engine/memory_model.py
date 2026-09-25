@@ -6,14 +6,14 @@ hash of convenience. Each slice's L2 is simulated exactly (tile-level replacemen
 answer to "is this tile in L2" is a fact with a residency list behind it, not a probability.
 
 The on-chip buffer is not part of a memory slice: it is a separate, explicitly managed level
-between L2 and HBM whose contents are decided ahead of time (see gpuTilingHWModel/slice_config.py
+between L2 and HBM whose contents are decided ahead of time (see gpuTilingPerfHWModel/slice_config.py
 `onchip_buffer.contents`), so its residency is a deterministic capacity share per tensor class.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..gpuTilingHWModel.spec import HardwareSpec
+from ..gpuTilingPerfHWModel.spec import HardwareSpec
 from .cache_sim import SimResult
 from .cache_sim import simulate as _simulate
 

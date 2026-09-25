@@ -182,7 +182,7 @@ Simulator implications: KDA layers keep a constant-size recurrent state (no KV g
 **Proposed layout**
 ```
 tilesight/
-  gpuTilingHWModel/         # YAMLs + calib/
+  gpuTilingPerfHWModel/         # YAMLs + calib/
   single_gpu/               # SUBSYSTEM A: lowerings, op_model, op_table, validate_ncu
   system/                   # SUBSYSTEM B: parallelism, collectives, overlap, moe_balance,
                             #              serving, disagg, validate_vllm

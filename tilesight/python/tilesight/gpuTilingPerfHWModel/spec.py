@@ -1,6 +1,6 @@
 """Hardware description.
 
-The hardware is a plain nested dict loaded from YAML (see gpuTilingHWModel/db/*.yaml) so that
+The hardware is a plain nested dict loaded from YAML (see gpuTilingPerfHWModel/db/*.yaml) so that
 design-space experiments can override ANY field by dotted path, e.g.
     cur_gpu_config.override({"memory.ddr.bandwidth_TBps": 12.0})
 
@@ -106,7 +106,7 @@ class HardwareSpec:
 
     def get(self, path: str, default: Any = _MISSING) -> Any:
         """Read a config field. An absent field falls back to the schema default, so the model
-        never carries hardware knowledge of its own (gpuTilingHWModel/schema.py is the single source)."""
+        never carries hardware knowledge of its own (gpuTilingPerfHWModel/schema.py is the single source)."""
         node: Any = self.raw
         for k in path.split("."):
             if not isinstance(node, dict) or k not in node:

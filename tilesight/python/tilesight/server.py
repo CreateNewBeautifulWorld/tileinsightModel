@@ -28,17 +28,17 @@ from pathlib import Path
 
 from .dse.sweep import required_value, sweep
 from .engine import backend
-from .gpuTilingHWModel.spec import DTYPE_BYTES
+from .gpuTilingPerfHWModel.spec import DTYPE_BYTES
 from .kernels.attention import lower_attention_decode, lower_attention_prefill
 from .kernels.gemm import lower_elementwise, lower_gemm
 from .kernels.tiles import AttnTileConfig, TileConfig, attn_search_space, gemm_search_space
-from .gpuTilingHWModel.spec import DB_DIR, HardwareSpec
+from .gpuTilingPerfHWModel.spec import DB_DIR, HardwareSpec
 from .model.request import run_request
 from .model.run_config import RunConfig
 from .model.runner import CurModelConfig, run
 from .model.spec import PRESET_DIR, ModelSpec
 from .model.workload import WORKLOAD_FIELDS, W_SECTIONS, run_workload, validate_workload
-from .gpuTilingHWModel.slice_config import SLICE_FIELDS, derive as slice_derive, to_hardware_spec, validate_slice_config
+from .gpuTilingPerfHWModel.slice_config import SLICE_FIELDS, derive as slice_derive, to_hardware_spec, validate_slice_config
 from .model.workload import compare_attention_impl, memory_breakdown
 from .report.archdiagram import arch_svg
 from .report.table import bound_report, model_summary, resource_class
@@ -121,7 +121,7 @@ def _load_hw(cfg: dict) -> HardwareSpec:
         if probs:
             raise ValueError("gpu config: " + "; ".join(probs[:5]))
         return to_hardware_spec(sl)
-    text = (cfg.get("gpuTilingHWModelYaml") or "").strip()
+    text = (cfg.get("gpuTilingPerfHWModelYaml") or "").strip()
     if text:
         import yaml as _yaml
         cur_gpu_config = HardwareSpec(_yaml.safe_load(text) or {})
@@ -129,8 +129,8 @@ def _load_hw(cfg: dict) -> HardwareSpec:
         if probs:
             raise ValueError("hardware config: " + "; ".join(probs[:5]))
     else:
-        cur_gpu_config = HardwareSpec.load(cfg.get("gpuTilingHWModel", "b300"))
-    ov = cfg.get("gpuTilingHWModelOverrides") or {}
+        cur_gpu_config = HardwareSpec.load(cfg.get("gpuTilingPerfHWModel", "b300"))
+    ov = cfg.get("gpuTilingPerfHWModelOverrides") or {}
     if isinstance(ov, str):
         import yaml
         ov = yaml.safe_load(ov) or {}
@@ -457,9 +457,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             return self.wfile.write(body)
-        if path == "/api/gpu_tiling_hw_model_yaml":
+        if path == "/api/gpu_tiling_perf_hw_model_yaml":
             q = dict(p.split("=", 1) for p in self.path.split("?", 1)[-1].split("&") if "=" in p)
-            f = DB_DIR / f"{q.get('gpuTilingHWModel', 'b300').lower()}.yaml"
+            f = DB_DIR / f"{q.get('gpuTilingPerfHWModel', 'b300').lower()}.yaml"
             if not f.exists():
                 return self._json(404, {"error": "no such preset"})
             return self._send(200, f.read_bytes(), "text/plain; charset=utf-8")
@@ -468,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
                 {"path": f.path, "kind": f.kind, "unit": f.unit, "section": f.section,
                  "doc": f.doc, "default": f.default} for f in SLICE_FIELDS]})
         if path == "/api/schema":
-            from .gpuTilingHWModel.schema import FIELDS as HW_FIELDS
+            from .gpuTilingPerfHWModel.schema import FIELDS as HW_FIELDS
             return self._json(200, {
                 "hardware": [{"path": f.path, "kind": f.kind, "unit": f.unit, "tag": f.tag,
                               "section": f.section, "doc": f.doc,
@@ -481,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/arch.svg":
             q = dict(p.split("=", 1) for p in self.path.split("?", 1)[-1].split("&") if "=" in p)
             try:
-                cur_gpu_config = HardwareSpec.load(q.get("gpuTilingHWModel", "b300"))
+                cur_gpu_config = HardwareSpec.load(q.get("gpuTilingPerfHWModel", "b300"))
             except Exception as e:                      # noqa: BLE001
                 return self._json(400, {"error": str(e)})
             return self._send(200, arch_svg(cur_gpu_config).encode(), "image/svg+xml")
@@ -541,7 +541,7 @@ class Handler(BaseHTTPRequestHandler):
             if wl:
                 out["memory"] = memory_breakdown(wl)
             return self._json(200, out)
-        if self.path.split("?")[0] == "/api/validate_gpu_tiling_hw_model":
+        if self.path.split("?")[0] == "/api/validate_gpu_tiling_perf_hw_model":
             import yaml as _yaml
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -549,7 +549,7 @@ class Handler(BaseHTTPRequestHandler):
                 raw = _yaml.safe_load(body.get("yaml") or "") or {}
             except Exception as e:                          # noqa: BLE001
                 return self._json(200, {"problems": [f"YAML error: {e}"], "fields": 0})
-            from .gpuTilingHWModel.schema import validate as _v
+            from .gpuTilingPerfHWModel.schema import validate as _v
             n_set = sum(1 for _ in json.dumps(raw))
             return self._json(200, {"problems": _v(raw), "fields": len(json.dumps(raw).split(","))})
         if self.path.split("?")[0] != "/api/jobs":

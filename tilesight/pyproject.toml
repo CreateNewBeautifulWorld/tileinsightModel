@@ -17,7 +17,7 @@ tilesight = "tilesight.cli:main"
 
 [tool.scikit-build]
 wheel.packages = ["python/tilesight"]
-sdist.include = ["python/tilesight/web/*.html", "python/tilesight/gpuTilingHWModel/db/*.yaml", "python/tilesight/model/presets/*"]
+sdist.include = ["python/tilesight/web/*.html", "python/tilesight/gpuTilingPerfHWModel/db/*.yaml", "python/tilesight/model/presets/*"]
 cmake.build-type = "Release"
 
 [tool.pytest.ini_options]

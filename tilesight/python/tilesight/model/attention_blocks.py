@@ -31,7 +31,7 @@ Core implementations (one GPU, tokens T = RunConfig.attn_tokens):
 """
 from __future__ import annotations
 
-from ..gpuTilingHWModel.spec import DTYPE_BYTES
+from ..gpuTilingPerfHWModel.spec import DTYPE_BYTES
 from .run_config import RunConfig
 
 
