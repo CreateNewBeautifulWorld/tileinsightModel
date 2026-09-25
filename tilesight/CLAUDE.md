@@ -99,6 +99,11 @@ tests/   examples/   docs/DESIGN.md   docs/TASKS.md   docs/research/*.md (backgr
 ```
 
 ## Commands
+`import tilesight` auto-builds `tilesight._core` on first use if it isn't there yet (runs
+`cmake -S . -B build && cmake --build build -j` for you, once; needs a C++17 compiler + cmake
+on PATH). So plain `PYTHONPATH=.. python -m tilesight.cli.cli ...` or `pytest -q` from a fresh
+checkout just works, no manual build step — the first call takes ~1-2 min, every one after is
+instant. Manual build is still there for explicit control:
 ```bash
 pip install -e ".[dev]"                     # builds C++ via scikit-build-core + nanobind
 # or, for fast iteration:
