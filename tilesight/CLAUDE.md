@@ -78,9 +78,13 @@ python/tilesight/
                               reaches into model/ directly.
   html/index.html, html/app.html   self-contained UI (no CDN/fonts/external requests) served by
                               cli/server.py — keep it that way
-cpp/include/tilesight/engine.hpp, cpp/src/{engine,cache}.cpp, cpp/bindings/bind.cpp   (top-level,
-                             outside python/tilesight/ — native build sources, untouched by the
-                             folder split above)
+gpuTilingPerfHWModel/model/cpp/include/tilesight/engine.hpp,
+gpuTilingPerfHWModel/model/cpp/src/{engine,cache}.cpp,
+gpuTilingPerfHWModel/model/cpp/bindings/bind.cpp   native mirror of model/engine/{reference,cache}.py;
+                             lives inside model/ since that's the folder this mirrors, and the
+                             intent is for it to eventually replace the Python there entirely.
+                             The compiled extension still lands at python/tilesight/_core*.so
+                             (CMakeLists.txt), since `from tilesight import _core` expects it there.
 tests/   examples/   docs/DESIGN.md   docs/TASKS.md   docs/research/*.md (background + specs)
 ```
 
@@ -101,7 +105,7 @@ PYTHONPATH=python python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000  
 
 ## Invariants (do not break)
 1. **Parity**: any change to `gpuTilingPerfHWModel/model/engine/reference.py` or `gpuTilingPerfHWModel/model/engine/cache.py` must be mirrored
-   in `cpp/src/*.cpp` in the same change; `tests/test_cpp_parity.py` requires ≤1e-9 rel
+   in `gpuTilingPerfHWModel/model/cpp/src/*.cpp` in the same change; `tests/test_cpp_parity.py` requires ≤1e-9 rel
    error and identical bottleneck labels (tie-break = insertion order, like Python `max`).
 2. **Units**: per-SM lanes carry *seconds on one SM*; shared lanes (`l2`, `ddr`) carry
    *bytes*. Lowerings convert with `HardwareSpec.*_time_per_sm`. Never mix.

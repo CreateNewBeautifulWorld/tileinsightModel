@@ -20,7 +20,7 @@ Always: tests first, both backends green, update DESIGN.md if a formula changes.
 ## Phase A — engine fidelity (paper-faithful)
 ⬜ **A1 Topological-order search (Eq. 5).** Enumerate legal orders of the body DAG (Kahn
   with pruning, cap 10k), evaluate an issue-order-aware steady time per order, take the
-  min. Files: engine/reference.py, cpp/src/engine.cpp. Accept: golden test — an 11-action
+  min. Files: model/engine/reference.py, gpuTilingPerfHWModel/model/cpp/src/engine.cpp. Accept: golden test — an 11-action
   MLA-decode DAG yields exactly 132 orders; parity test extended; no regression on GEMMs.
 ⬜ **A2 Paper envelope mode.** `Kernel.envelope = "fill" | "paper"`; paper: `T = T_pro +
   max(N−d,0)·R + T_epi`, `d = stages·resident−1`. Accept: both modes tested; deep-K sweep

@@ -12,9 +12,10 @@ execute_process(COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
 find_package(nanobind CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
+set(TS_CPP_DIR python/tilesight/gpuTilingPerfHWModel/model/cpp)
 nanobind_add_module(_core NB_STATIC
-  cpp/src/engine.cpp cpp/src/cache.cpp cpp/bindings/bind.cpp)
-target_include_directories(_core PRIVATE cpp/include)
+  ${TS_CPP_DIR}/src/engine.cpp ${TS_CPP_DIR}/src/cache.cpp ${TS_CPP_DIR}/bindings/bind.cpp)
+target_include_directories(_core PRIVATE ${TS_CPP_DIR}/include)
 target_link_libraries(_core PRIVATE Threads::Threads)
 
 # scikit-build-core installs into the package dir; plain CMake builds drop it in python/tilesight
