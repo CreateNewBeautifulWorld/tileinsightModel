@@ -168,12 +168,15 @@ def to_run_config(cfg: dict):
                      include_lm_head=False)
 
 
-def run_workload(cfg: dict, hw, progress=None):
+def run_workload(cfg: dict, cur_gpu_config, progress=None):
     """Evaluate the workload on one GPU. Returns the standard ModelReport.
 
-    `hw` carries the tile policy (compute.tile_policy.*) — it's GPU-side, not part of `cfg`."""
-    from .runner import run_model
-    return run_model(to_model_spec(cfg), hw, to_run_config(cfg), progress=progress)
+    `cfg` (the workload dict) only ever generates a `CurModelConfig` here — the model layer
+    never sees "workload" itself. `cur_gpu_config` carries the tile policy
+    (compute.tile_policy.*); that's GPU-side, not part of `cfg`."""
+    from .runner import CurModelConfig, run
+    cur_model_config = CurModelConfig(spec=to_model_spec(cfg), run=to_run_config(cfg))
+    return run(cur_gpu_config, cur_model_config, progress=progress)
 
 
 def memory_breakdown(cfg: dict) -> dict:

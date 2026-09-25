@@ -12,11 +12,19 @@ enforces it.
         ├── slice form  ─────┐                │
         │   hw/slice_config  │                │
         │        derive()    ▼                ▼
-        └── flat form ──►  HardwareSpec ──►  the model
-            hw/schema.py                     engine + kernels + model
-            (incl. compute.tile_policy.*
-             — see §3)
+        └── flat form ──►  HardwareSpec        ModelSpec + RunConfig
+            hw/schema.py    = cur_gpu_config   = CurModelConfig = cur_model_config
+            (incl. compute.tile_policy.*             │
+             — see §3)                               │
+                    └──────────► run(cur_gpu_config, cur_model_config) ──────────►  the model
+                                                                                     engine + kernels + model
 ```
+
+`run()` (model/runner.py, re-exported from the package root) is the model's only entry point,
+and it only ever takes these two runtime-built objects. Nothing called "workload" reaches it:
+the workload config (§2) is one way to *build* a `CurModelConfig` — `to_model_spec()` +
+`to_run_config()` turn a one-layer workload dict into one — the model layer itself never sees
+the dict.
 
 Tile policy — how a GEMM/attention op is tiled — is a GPU-side modelling choice, not a property
 of the workload, so it lives inside the GPU config (§3) rather than as a separate input.

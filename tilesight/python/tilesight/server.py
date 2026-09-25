@@ -35,10 +35,9 @@ from .kernels.tiles import AttnTileConfig, TileConfig, attn_search_space, gemm_s
 from .hw.spec import DB_DIR, HardwareSpec
 from .model.request import run_request
 from .model.run_config import RunConfig
-from .model.runner import run_model
+from .model.runner import CurModelConfig, run
 from .model.spec import PRESET_DIR, ModelSpec
-from .model.workload import (WORKLOAD_FIELDS, W_SECTIONS, run_workload, to_model_spec,
-                             to_run_config, validate_workload)
+from .model.workload import WORKLOAD_FIELDS, W_SECTIONS, run_workload, validate_workload
 from .hw.slice_config import SLICE_FIELDS, derive as slice_derive, to_hardware_spec, validate_slice_config
 from .model.workload import compare_attention_impl, memory_breakdown
 from .report.archdiagram import arch_svg
@@ -304,12 +303,19 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
                 log.append(line)
                 del log[:-8]
     try:
-        model, hw, rc = _load_model(cfg), _load_hw(cfg), _run_config(cfg)
+        # The two configs the model actually takes. Whatever the request came from (a preset
+        # pick, a custom hw/model YAML, or the "workload" one-layer shortcut below), it's built
+        # here and only here — the model layer downstream never sees "workload" or raw request
+        # JSON, only cur_gpu_config + cur_model_config.
+        cur_gpu_config = _load_hw(cfg)
+        cur_model_config = CurModelConfig(spec=_load_model(cfg), run=_run_config(cfg))
+        model, rc = cur_model_config.spec, cur_model_config.run
+        hw = cur_gpu_config  # alias: report/timeline helpers below take `hw` by convention
         if mode == "run":
-            rep = run_model(model, hw, rc, progress=prog)
+            rep = run(cur_gpu_config, cur_model_config, progress=prog)
             out = _model_json(rep)
         elif mode == "request":
-            r = run_request(model, hw, rc, progress=prog)
+            r = run_request(model, cur_gpu_config, rc, progress=prog)
             out = {"summary": request_summary(r), "ttft_ms": r.ttft_s * 1e3,
                    "tpot_first_ms": r.points[0].tpot_s * 1e3, "tpot_last_ms": r.points[-1].tpot_s * 1e3,
                    "tpot_avg_ms": r.tpot_avg_s * 1e3, "e2e_s": r.e2e_s,

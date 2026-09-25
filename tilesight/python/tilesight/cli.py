@@ -14,7 +14,7 @@ import json
 
 import yaml
 
-from . import HardwareSpec, ModelSpec, RunConfig, run_model
+from . import CurModelConfig, HardwareSpec, ModelSpec, RunConfig, run, run_model
 from .dse.sweep import required_value, rows_to_csv, sweep
 from .report.table import model_summary, ops_csv
 
@@ -450,25 +450,29 @@ def main(argv=None):
     if a.cmd == "dump-model":
         print(model.dump_yaml())
         return
-    hw, rc = _hw(a), _rc(a)
+    # The two configs the model actually takes: cur_gpu_config (what the part is, incl. how it
+    # tiles) and cur_model_config (what runs on it). --model/--hw/--run-config/--set/--tile just
+    # pick how they're built here at the CLI boundary.
+    cur_gpu_config = _hw(a)
+    cur_model_config = CurModelConfig(spec=model, run=_rc(a))
     if a.cmd == "request":
         from .model.request import request_summary, run_request
-        print(request_summary(run_request(model, hw, rc)))
+        print(request_summary(run_request(model, cur_gpu_config, cur_model_config.run)))
         return
     if a.cmd == "run":
-        rep = run_model(model, hw, rc)
+        rep = run(cur_gpu_config, cur_model_config)
         print(model_summary(rep))
         if a.csv:
             open(a.csv, "w").write(ops_csv(rep))
     elif a.cmd == "sweep":
         vals = [float(v) for v in a.values.split(",")]
-        rows = sweep(model, hw, rc, a.param, vals)
+        rows = sweep(model, cur_gpu_config, cur_model_config.run, a.param, vals)
         out = rows_to_csv(rows)
         print(out)
         if a.csv:
             open(a.csv, "w").write(out)
     elif a.cmd == "need":
-        v = required_value(model, hw, rc, a.param, a.target_ms, a.lo, a.hi)
+        v = required_value(model, cur_gpu_config, cur_model_config.run, a.param, a.target_ms, a.lo, a.hi)
         print(f"{a.param} needed for step <= {a.target_ms} ms: {v if v is None else round(v, 3)}")
 
 

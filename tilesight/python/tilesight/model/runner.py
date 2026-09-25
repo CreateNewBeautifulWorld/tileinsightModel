@@ -275,8 +275,30 @@ def _install_sram_footprints(model: ModelSpec, rc: RunConfig, hw: HardwareSpec, 
     return hw.override({"memory.sram.footprint": {"weight": weights, "kv": kv, "act": act}})
 
 
+@dataclass
+class CurModelConfig:
+    """The model's only 'what to run' input: architecture (ModelSpec) + how to run it
+    (RunConfig), bundled into one object. Built at the boundary (CLI flags / web request) from
+    either a full multi-layer model (`--model`) or a one-layer `workload` dict
+    (model/workload.py's `to_model_spec()`/`to_run_config()`) — the model layer itself never
+    sees "workload", only this."""
+    spec: ModelSpec
+    run: RunConfig
+
+
+def run(cur_gpu_config: HardwareSpec, cur_model_config: CurModelConfig, progress=None) -> ModelReport:
+    """The model's only entry point: two runtime-built configs, nothing else.
+
+    progress(done, total, label) is called per op so UIs can show a processing state."""
+    return run_model(cur_model_config.spec, cur_gpu_config, cur_model_config.run, progress=progress)
+
+
 def run_model(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, progress=None) -> ModelReport:
-    """progress(done, total, label) is called per op so UIs can show a processing state."""
+    """Internal engine entry point (model, hw, rc positional) — kernels/lowering/report code and
+    existing scripts use this directly. `run(cur_gpu_config, cur_model_config)` above is the
+    boundary-facing wrapper; prefer it in new CLI/server/UI code.
+
+    progress(done, total, label) is called per op so UIs can show a processing state."""
     groups = lower_model(model, rc)
     hw = _install_sram_footprints(model, rc, hw, groups)
     results = []
