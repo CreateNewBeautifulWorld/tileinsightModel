@@ -115,16 +115,16 @@ def test_wizard_endpoints(url):
     assert "Step 1" in page and "Step 5" in page and "http://" not in page.split("<script>")[0]
     sc = json.load(urllib.request.urlopen(url + "/api/schema"))
     assert len(sc["hardware"]) > 90 and len(sc["workload"]) >= 30
-    assert urllib.request.urlopen(url + "/api/hw_yaml?hw=b300").read().startswith(b"#")
-    assert urllib.request.urlopen(url + "/api/arch.svg?hw=b300").read().startswith(b"<svg")
-    req = urllib.request.Request(url + "/api/validate_hw", method="POST",
+    assert urllib.request.urlopen(url + "/api/gpu_tiling_hw_model_yaml?gpuTilingHWModel=b300").read().startswith(b"#")
+    assert urllib.request.urlopen(url + "/api/arch.svg?gpuTilingHWModel=b300").read().startswith(b"<svg")
+    req = urllib.request.Request(url + "/api/validate_gpu_tiling_hw_model", method="POST",
                                  data=json.dumps({"yaml": "name: x\nsms: 4\n"}).encode(),
                                  headers={"Content-Type": "application/json"})
     assert any("missing required" in p for p in json.load(urllib.request.urlopen(req))["problems"])
 
 
 def test_workload_job_reports_progress_and_downloads(url):
-    jid, j = _job(url, "workload", {"hw": "b300", "workload": WL})
+    jid, j = _job(url, "workload", {"gpuTilingHWModel": "b300", "workload": WL})
     assert j["state"] == "done"
     r = j["result"]
     assert r["arch_svg"].startswith("<svg") and r["timeline"] and r["trace_kernel"]
@@ -135,16 +135,16 @@ def test_workload_job_reports_progress_and_downloads(url):
 
 
 def test_custom_gpu_yaml_is_accepted_and_validated(url):
-    y = urllib.request.urlopen(url + "/api/hw_yaml?hw=h200").read().decode()
-    _, ok = _job(url, "workload", {"hw_yaml": y.replace("sms: 132", "sms: 99"), "workload": WL})
-    assert ok["state"] == "done" and ok["result"]["hw_name"] == "H200"
-    _, bad = _job(url, "workload", {"hw_yaml": "name: broken\nsms: 8\n", "workload": WL})
+    y = urllib.request.urlopen(url + "/api/gpu_tiling_hw_model_yaml?gpuTilingHWModel=h200").read().decode()
+    _, ok = _job(url, "workload", {"gpuTilingHWModelYaml": y.replace("sms: 132", "sms: 99"), "workload": WL})
+    assert ok["state"] == "done" and ok["result"]["gpu_name"] == "H200"
+    _, bad = _job(url, "workload", {"gpuTilingHWModelYaml": "name: broken\nsms: 8\n", "workload": WL})
     assert bad["state"] == "error" and "hardware config" in bad["error"]
 
 
 def test_slice_config_derives_and_translates():
     import yaml
-    from tilesight.hw.slice_config import (derive, to_hardware_spec, validate_slice_config)
+    from tilesight.gpuTilingHWModel.slice_config import (derive, to_hardware_spec, validate_slice_config)
     cfg = yaml.safe_load(open("examples/slice_gpu.yaml"))
     assert validate_slice_config(cfg) == []
     d = derive(cfg)
@@ -198,7 +198,7 @@ def test_derive_endpoint_and_slice_job(url):
 
 
 def test_model_is_organised_in_three_blocks():
-    from tilesight.hw.spec import lane_domain
+    from tilesight.gpuTilingHWModel.spec import lane_domain
     from tilesight.report.table import domain_of
     lanes = {l.name: l for l in HW.lanes()}
     assert lanes["tc"].domain == "shader_slice" and lanes["tc"].scope == "per_core"

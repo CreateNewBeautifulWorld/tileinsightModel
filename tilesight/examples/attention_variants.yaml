@@ -1,5 +1,5 @@
 # One model, three attention families side by side (each layer group is independent).
-# Run: tilesight run --model examples/attention_variants.yaml --hw b300 --phase prefill --batch 1 --seq 16384 --dp 1
+# Run: tilesight run --model examples/attention_variants.yaml --gpu-tiling-hw-model b300 --phase prefill --batch 1 --seq 16384 --dp 1
 name: attention-zoo
 hidden: 4096
 vocab: 32000

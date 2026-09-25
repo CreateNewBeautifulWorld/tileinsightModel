@@ -11,13 +11,13 @@ bit-identical to the Python reference engine.
 ```bash
 pip install -e ".[dev]"            # or: cmake -S . -B build && cmake --build build -j
 PYTHONPATH=python pytest -q
-PYTHONPATH=python python -m tilesight.cli run --model kimi_k2.hf --hw b300 \
+PYTHONPATH=python python -m tilesight.cli run --model kimi_k2.hf --gpu-tiling-hw-model b300 \
     --phase decode --batch 256 --seq 8192 --dp 8
-PYTHONPATH=python python -m tilesight.cli request --model kimi_k2.hf --hw b300 --batch 256 --dp 8 \
+PYTHONPATH=python python -m tilesight.cli request --model kimi_k2.hf --gpu-tiling-hw-model b300 --batch 256 --dp 8 \
     --prompt 8192 --output 4096            # TTFT, TPOT curve, peak memory, max concurrency
-PYTHONPATH=python python -m tilesight.cli sweep --model kimi_k2.hf --hw b300 --phase decode \
+PYTHONPATH=python python -m tilesight.cli sweep --model kimi_k2.hf --gpu-tiling-hw-model b300 --phase decode \
     --batch 256 --seq 8192 --dp 8 --param memory.ddr.bandwidth_TBps --values 4,8,12,16
-PYTHONPATH=python python -m tilesight.cli need --model kimi_k2.hf --hw b300 --phase decode \
+PYTHONPATH=python python -m tilesight.cli need --model kimi_k2.hf --gpu-tiling-hw-model b300 --phase decode \
     --batch 256 --seq 8192 --dp 8 --param memory.ddr.bandwidth_TBps --target-ms 25
 PYTHONPATH=python python -m tilesight.cli dump-model --model kimi_k2.hf > my_model.yaml   # edit sizes
 PYTHONPATH=python python examples/sweep_ddr_bw_b300.py
@@ -48,7 +48,7 @@ a browser; every evaluation runs on the serving machine with the C++ engine.
   occupancy) and a **per-cycle CSV** (one row per cycle, one column per unit + busy fraction),
   for the drawn rounds or the whole kernel.
   Same thing in the terminal:
-  `python -m tilesight.cli kernel --hw b300 --kernel gemm --dtype fp8 --shape '{"M":4096,"N":4096,"K":7168}' --unit cyc --trace-out trace.txt --csv-out cycles.csv --xlsx-out cycles.xlsx`
+  `python -m tilesight.cli kernel --gpu-tiling-hw-model b300 --kernel gemm --dtype fp8 --shape '{"M":4096,"N":4096,"K":7168}' --unit cyc --trace-out trace.txt --csv-out cycles.csv --xlsx-out cycles.xlsx`
 - Config: model preset **or pasted layer-size YAML / HF config**, hardware preset + dotted
   overrides (`{"memory.ddr.bandwidth_TBps": 12}`), phase, batch, seq, prompt/output, TP/DP/EP,
   dtypes, attention impl, tile policy and per-op tile overrides.
@@ -70,8 +70,8 @@ lowering holds the GIL, so one process serializes CPU-bound jobs.
 model only ever sees config.
 
 ## Three inputs, three schemas
-1. **GPU config** — `hw/schema.py`, 99 fields. `tilesight config --list`.
-1b. **GPU config, slice form** — `hw/slice_config.py`, 42 fields: shader slices (cores per slice,
+1. **GPU config** — `gpuTilingHWModel/schema.py`, 99 fields. `tilesight config --list`.
+1b. **GPU config, slice form** — `gpuTilingHWModel/slice_config.py`, 42 fields: shader slices (cores per slice,
    tensor cores per core, wave32 units, MMA tile M/N/K and its latency in cycles, shared memory
    and GPR shared-or-split), memory slices (HBM + L2 port + DMA port each, L2 may be 0),
    addressing (linear or N-KB interleave), the on-chip buffer and what is pinned on it, and gmem
@@ -80,7 +80,7 @@ model only ever sees config.
    flat form. `tilesight gpu --file my_gpu.yaml --workload wl.yaml`.
 2. **Workload config** — `model/workload.py`, 34 fields: one layer on one GPU (attention type and
    dims, FFN/MoE, datatypes, phase/batch/seq). `tilesight config --workload`.
-3. **Tile policy** — part of the GPU config, not the workload (`hw/schema.py`'s
+3. **Tile policy** — part of the GPU config, not the workload (`gpuTilingHWModel/schema.py`'s
    `compute.tile_policy.gemm`/`.attn`/`.overrides`): `auto` or a fixed tile. It's a modelling
    choice about how *this part* executes a GEMM/attention op, independent of which model runs on it.
 
@@ -94,7 +94,7 @@ per-cycle **Excel** (columns grouped into shader / L1+scratchpad / on-chip buffe
 HBM sections, scroll horizontally), CSV, and a **PDF report** with the grouped timeline.
 
 ## The hardware interface
-A GPU is input, not model. `hw/schema.py` declares all 99 config fields (15 sections; tags:
+A GPU is input, not model. `gpuTilingHWModel/schema.py` declares all 99 config fields (15 sections; tags:
 39 spec, 33 calib, 15 policy, 12 loss) and is the only place defaults live.
 `tilesight config --list|--validate <file>|--md docs/CONFIG.md|--csv ref.csv`.
 A test enforces that no engine/kernel/model file names a device or vendor and that every
@@ -123,7 +123,7 @@ preset validates.
   `tilesight buffer --model … --capacity 32768` prints the closed-form allocation
   (value/byte = HBM traffic ÷ footprint per class) and then searches policies × splits;
   `--capacities 0,128,…` sweeps the capacity curve.
-- **Hardware** (`hw/db/*.yaml`): NVIDIA **B300** (default), **B200**, **H200**; AMD **MI300X**,
+- **Hardware** (`gpuTilingHWModel/db/*.yaml`): NVIDIA **B300** (default), **B200**, **H200**; AMD **MI300X**,
   **MI325X**, **MI355X**, **MI450** (CDNA3/4/5 — `sms` = CUs, on-chip `smem` = LDS, `l2` = Infinity
   Cache/MALL, no TMA/TMEM/clusters, load paths `tdm`/`buffer_lds`/`lsu`). Every field is overridable by
   dotted path (`--set memory.ddr.bandwidth_TBps=12`). New on-chip memories / load paths

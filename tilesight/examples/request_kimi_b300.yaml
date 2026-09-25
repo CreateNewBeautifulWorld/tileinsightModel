@@ -1,4 +1,4 @@
-# Request-level run: tilesight request --model kimi_k2.hf --hw b300 --run-config examples/request_kimi_b300.yaml
+# Request-level run: tilesight request --model kimi_k2.hf --gpu-tiling-hw-model b300 --run-config examples/request_kimi_b300.yaml
 batch: 256            # concurrent requests (global)
 tp: 1
 dp: 8

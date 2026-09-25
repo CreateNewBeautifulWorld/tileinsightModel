@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..hw.spec import HardwareSpec
+from ..gpuTilingHWModel.spec import HardwareSpec
 
 
 def tile_index(layout: str, i: int, j: int, ni: int, nj: int) -> int:

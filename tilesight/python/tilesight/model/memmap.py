@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..hw.spec import DTYPE_BYTES
+from ..gpuTilingHWModel.spec import DTYPE_BYTES
 from .lower import lower_model
 from .memory import kv_bytes_per_seq_all
 from .run_config import RunConfig

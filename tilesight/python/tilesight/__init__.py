@@ -15,7 +15,7 @@ Quick start:
 `run_model(model, cur_gpu_config, rc)` is the lower-level, three-argument engine entry point
 that `run()` wraps; existing code and internal callers keep using it directly.
 """
-from .hw.spec import HardwareSpec
+from .gpuTilingHWModel.spec import HardwareSpec
 from .model.run_config import RunConfig
 from .model.runner import CurModelConfig, run, run_model
 from .model.spec import ModelSpec

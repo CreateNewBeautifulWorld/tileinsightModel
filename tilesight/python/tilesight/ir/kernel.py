@@ -6,7 +6,7 @@ A `Kernel` is a *tile execution plan* already lowered to numbers:
   * `resident` = blocks co-resident per SM (from the occupancy solver)
   * `stages`   = software-pipeline depth (multi-buffered loads)
 
-Each `Action` carries a work vector over lanes (see hw/spec.py for units) and DAG
+Each `Action` carries a work vector over lanes (see gpuTilingHWModel/spec.py for units) and DAG
 dependencies on earlier actions *of the same list* (listed in topological order).
 `recurrent=True` marks loop-carried compute (e.g. online-softmax state, attention
 accumulator) whose chain can only be overlapped by `consumers` ping-pong warpgroups

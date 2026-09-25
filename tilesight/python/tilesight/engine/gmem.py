@@ -13,7 +13,7 @@ level's own bandwidth is used, which is what every datasheet-form preset does.
 """
 from __future__ import annotations
 
-from ..hw.spec import Lane
+from ..gpuTilingHWModel.spec import Lane
 
 
 def per_core_rate(lane: Lane, active_cores: int) -> float:

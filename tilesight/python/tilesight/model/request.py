@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-from ..hw.spec import HardwareSpec
+from ..gpuTilingHWModel.spec import HardwareSpec
 from .memory import GB, kv_bytes_per_seq_all
 from .run_config import RunConfig
 from .runner import ModelReport, run_model

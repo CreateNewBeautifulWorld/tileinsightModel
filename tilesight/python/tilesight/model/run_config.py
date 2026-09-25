@@ -2,7 +2,7 @@
 
 Tile policy (how the GPU tiles a GEMM/attention op) is NOT here: it's a GPU-side modelling
 choice, not a property of the workload, and lives in the hardware config instead
-(hw/schema.py's compute.tile_policy.*, see model/runner.py)."""
+(gpuTilingHWModel/schema.py's compute.tile_policy.*, see model/runner.py)."""
 from __future__ import annotations
 
 from dataclasses import dataclass

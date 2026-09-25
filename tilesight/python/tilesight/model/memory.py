@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from ..hw.spec import DTYPE_BYTES, HardwareSpec
+from ..gpuTilingHWModel.spec import DTYPE_BYTES, HardwareSpec
 from .attention_blocks import kv_bytes_per_seq
 from .run_config import RunConfig
 from .spec import ModelSpec

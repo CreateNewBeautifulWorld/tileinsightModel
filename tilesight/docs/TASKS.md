@@ -51,7 +51,7 @@ Always: tests first, both backends green, update DESIGN.md if a formula changes.
 ⬜ C4 TC peak per dtype via CUTLASS/DeepGEMM microkernels (incl. 2-CTA) ⬜ C5 SFU exp rate
 ⬜ C6 TMA vs LSU per-SM issue rates ⬜ C7 launch overhead with/without CUDA graphs
 ⬜ C8 NCCL/NVSHMEM alpha-beta per message size (allreduce, all-to-all)
-Accept: `python -m tilesight.calibrate --gpu 0 --out hw/db/<gpu>.calib.yaml`; loader
+Accept: `python -m tilesight.calibrate --gpu 0 --out gpuTilingHWModel/db/<gpu>.calib.yaml`; loader
 merges `*.calib.yaml` over the base file; every `[calib]` field covered.
 
 ## Phase D — validation harness
@@ -132,26 +132,26 @@ Targets (paper): GEMM MAPE ≈12%, distributed ≈16% wMAPE, serving ≈14% wMAP
 ⬜ G6 Power/energy lane (pJ/byte, pJ/flop) → tokens/J in reports and DSE.
 
 ## Phase W (updated)
-✅ slice-based GPU config (`hw/slice_config.py`) with derived TFLOPS/PFLOPS/bandwidths and a
+✅ slice-based GPU config (`gpuTilingHWModel/slice_config.py`) with derived TFLOPS/PFLOPS/bandwidths and a
    translation into the flat config; Kimi-K3 10-layer workload preset; INTERFACE.md
 ✅ model organised in three blocks (shader slice / gmem / memory), L1 as a per-slice resource,
    `by_domain()` roll-up everywhere; flash-vs-naive comparison
 ⬜ W7 Show the best schedule found by the tile search next to the current one in the trace
    (the paper's cost-model-driven selection, as a diff on the timeline)
 ✅ workload config schema (single-GPU layer) + validation + `tilesight config --workload`
-✅ five-step wizard UI (GPU -> hw config -> workload -> run with live log -> results)
+✅ five-step wizard UI (GPU -> gpuTilingHWModel config -> workload -> run with live log -> results)
 ✅ GPU architecture diagram drawn from the config; PDF report; Excel columns grouped by unit
-⬜ W6 Wizard extras: save/load a whole run (hw + workload) as one file, compare two runs
+⬜ W6 Wizard extras: save/load a whole run (gpuTilingHWModel + workload) as one file, compare two runs
    side by side, and show the Figure 3(d)(e)(f) panels inline on the results page
 
 ## Phase W — web UI / serving (partly done)
-✅ stdlib server with async jobs + progress, self-contained HTML UI, hw overrides, custom model YAML
+✅ stdlib server with async jobs + progress, self-contained HTML UI, gpuTilingHWModel overrides, custom model YAML
 ✅ buffer policies (cache/pin shares, keep_intermediates, bypass_l2, prefetch, costream),
    closed-form allocation + policy search + capacity curve (`tilesight buffer`)
 ✅ configurable extra on-chip shared buffer (`memory.sram`, e.g. 64 MB A/B staging) with
    cross-call residency; coloured per-cycle Excel export (`--xlsx-out`, `/api/xlsx`)
 ✅ single-GPU kernel mode (pick card + kernel + shapes -> latency, % of peak, occupancy, tile ranking)
-⬜ W1 Result caching keyed by (model, hw fingerprint, run config) so repeated configs return instantly
+⬜ W1 Result caching keyed by (model, gpuTilingHWModel fingerprint, run config) so repeated configs return instantly
 ⬜ W2 Multi-process workers (`--workers N`, socket reuse) for concurrent users; queue depth in the UI
 ✅ Steady-state timeline (Fig. 3e) in the web UI (SVG, µs/cycle toggle) and CLI (ASCII);
    full text trace export (`--trace-out`, download button) with cycles and wave decomposition;
@@ -166,7 +166,7 @@ Targets (paper): GEMM MAPE ≈12%, distributed ≈16% wMAPE, serving ≈14% wMAP
 ⬜ W5 Auth/limits if exposed beyond the LAN (token header, per-IP job cap, max sweep points)
 
 ## Phase H — from research report 02 (docs/research/02_accuracy_tuning_presets_kimi_k3.md)
-⬜ **H1 GB300 preset** `hw/db/gb300.yaml` (NVL72 domain 72, NVLink5 1.8 TB/s bidir); resolve the
+⬜ **H1 GB300 preset** `gpuTilingHWModel/db/gb300.yaml` (NVL72 domain 72, NVLink5 1.8 TB/s bidir); resolve the
   BF16/FP8 peak conflict (2250/4500 vs 2500/5000) with a probe; keep `[calib]` tags.
 🟡 **H2 AMD presets added** (mi300x/mi325x/mi355x/mi450: LDS as on-chip, MALL modeled as `l2`,
   no TMA/TMEM/clusters, buffer_lds/tdm load paths, MFMA `tc_min_m` 16). **Still to do:**
@@ -185,7 +185,7 @@ Targets (paper): GEMM MAPE ≈12%, distributed ≈16% wMAPE, serving ≈14% wMAP
   validate_ncu) and `system/` (parallelism, collectives, overlap, moe_balance, serving,
   disagg, validate_vllm) with the OpSpec/OpResult contract (bound + confidence fields);
   keep `model/` feeding both. Accept: system layer never imports kernels/*; table cache keyed
-  by (hw fingerprint, calib hash, version).
+  by (gpuTilingHWModel fingerprint, calib hash, version).
 ⬜ **H5 Accuracy guardrails from the tuning guide**: deep-K L2 hit clamp option, measured-SFU
   enforcement (warn when using spec SFU), per-symptom diagnostic CLI
   (`tilesight diagnose --ncu report.csv`) that maps residuals to the parameters in report 02 §2.

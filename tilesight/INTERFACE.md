@@ -10,10 +10,10 @@ enforces it.
     including how it tiles)
         │                                    │
         ├── slice form  ─────┐                │
-        │   hw/slice_config  │                │
+        │   gpuTilingHWModel/slice_config  │                │
         │        derive()    ▼                ▼
         └── flat form ──►  HardwareSpec        ModelSpec + RunConfig
-            hw/schema.py    = cur_gpu_config   = CurModelConfig = cur_model_config
+            gpuTilingHWModel/schema.py    = cur_gpu_config   = CurModelConfig = cur_model_config
             (incl. compute.tile_policy.*             │
              — see §3)                               │
                     └──────────► run(cur_gpu_config, cur_model_config) ──────────►  the model
@@ -33,7 +33,7 @@ of the workload, so it lives inside the GPU config (§3) rather than as a separa
 
 Two equivalent forms.
 
-**Flat form** (`hw/schema.py`, 99 fields) — a datasheet view: peaks, capacities, latencies,
+**Flat form** (`gpuTilingHWModel/schema.py`, 99 fields) — a datasheet view: peaks, capacities, latencies,
 ports. This is what the model consumes. `tilesight config --list`, `tilesight config --validate
 my_gpu.yaml`. Every field carries a tag:
 
@@ -44,7 +44,7 @@ my_gpu.yaml`. Every field carries a tag:
 | `policy` | a modelling choice, not a property of the silicon |
 | `loss` | a derating knob — **every one defaults to no loss** |
 
-**Slice form** (`hw/slice_config.py`, 42 fields) — an architect's view, and what the web app
+**Slice form** (`gpuTilingHWModel/slice_config.py`, 42 fields) — an architect's view, and what the web app
 asks for:
 
 - **shader core**: clock, wave32 units per core, tensor cores per core, resident waves per SIMD,
@@ -96,7 +96,7 @@ sparse MoE. `tilesight config --workload` lists every field.
 ## 3. Tile policy
 
 Part of the GPU config, not the workload (`compute.tile_policy.gemm`, `compute.tile_policy.attn`
-in `hw/schema.py`, tag `policy`): `auto` searches the space, or give a fixed tile as JSON.
+in `gpuTilingHWModel/schema.py`, tag `policy`): `auto` searches the space, or give a fixed tile as JSON.
 `compute.tile_policy.overrides` is an fnmatch pattern on op name -> partial tile fields, checked
 first. When the GPU config fixes the attention tile (`compute.attention_tile_m/n`, which the
 slice form always sets), the model uses that tile and only searches the pipeline knobs around it.
@@ -167,5 +167,5 @@ tilesight serve --host 0.0.0.0 --port 8000                                  # th
 
 JSON API: `GET /api/schema` (flat + workload), `GET /api/slice_schema`,
 `POST /api/derive {slice_cfg, workload}` → derived numbers + memory breakdown + architecture SVG,
-`POST /api/jobs {mode: "workload", config: {slice_cfg | hw_yaml | hw, workload}}`,
+`POST /api/jobs {mode: "workload", config: {slice_cfg | gpuTilingHWModelYaml | gpuTilingHWModel, workload}}`,
 `GET /api/jobs/<id>` (progress + live log), then `/api/xlsx|csv|pdf?job=<id>`.

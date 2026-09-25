@@ -1,7 +1,7 @@
 # DESIGN — equations, semantics, deviations
 
 ## 0. The interface: GPU config in, model behind it
-A GPU is **input**, not part of the model. `python/tilesight/hw/schema.py` declares every field
+A GPU is **input**, not part of the model. `python/tilesight/gpuTilingHWModel/schema.py` declares every field
 the model may see — 99 fields in 15 sections, each with a type, unit, default, and a tag:
 `spec` (copy it from the vendor), `calib` (measure it), `policy` (a modelling choice) or `loss`
 (a derating knob, default always no loss). The reference is generated from it:
@@ -24,7 +24,7 @@ ModelSpec (blocks: mla/gqa/mlp/moe/norm/raw)      model/spec.py      <- user giv
    │  RunConfig (phase, batch, seq, tp/dp/ep, dtypes)
    ▼
 Ops for one GPU (gemm, attn_decode, attn_prefill, elementwise, allreduce, a2a)   model/lower.py
-   │  tile policy (GPU config, hw/schema.py's compute.tile_policy.*):
+   │  tile policy (GPU config, gpuTilingHWModel/schema.py's compute.tile_policy.*):
    │  fixed | per-op override (fnmatch) | auto search (kernels/tiles.py)
    ▼
 Kernels = tile execution plans lowered to numbers (ir/kernel.py)   kernels/*.py
@@ -418,7 +418,7 @@ because the L2 side and the memory side are different hardware: `l2` (slices / l
 `addr_bits` (48) and a `mode`:
 `interleave` (port = (addr >> log2 gran) % ports, the usual case), `range` (the address space
 split into equal contiguous ranges) and `hash` (interleave after XOR-folding the higher address
-bits, which breaks power-of-two stride aliasing). `tilesight addrmap --hw b300 [--side l2|ddr]
+bits, which breaks power-of-two stride aliasing). `tilesight addrmap --gpu-tiling-hw-model b300 [--side l2|ddr]
 [--decode 0x…] [--csv table.csv]` dumps the mapping — which stripes or which range each port
 owns — and decodes individual addresses. Measured effect on one wave of a 4096³ FP8 GEMM
 (B300, 16 slices): 1 KB interleave 1.33x imbalance (75% of peak), 2 KB 2.00x (50%), `hash`

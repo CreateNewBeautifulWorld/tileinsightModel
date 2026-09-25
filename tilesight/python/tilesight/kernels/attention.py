@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 
-from ..hw.spec import DTYPE_BYTES, HardwareSpec
+from ..gpuTilingHWModel.spec import DTYPE_BYTES, HardwareSpec
 from ..ir.kernel import Action, Kernel
 from ..engine import backend
 from .gemm import gload, gstore, lower_elementwise, occupancy, reg_estimate, resident_frac, tensor_class

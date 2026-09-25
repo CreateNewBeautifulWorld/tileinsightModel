@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 
-from ..hw.spec import Lane
+from ..gpuTilingHWModel.spec import Lane
 from ..ir.kernel import Action
 from .gmem import lane_time
 

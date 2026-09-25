@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 
-from ..hw.spec import HardwareSpec, Lane
+from ..gpuTilingHWModel.spec import HardwareSpec, Lane
 from ..ir.kernel import Action, Kernel, KernelResult
 from .gmem import lane_time as _u_lane
 from .shader import critical_path as _critical_path

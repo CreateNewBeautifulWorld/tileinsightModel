@@ -21,7 +21,7 @@ Structure
                      bandwidth, read and write separately
 
 `to_hardware_spec()` translates all of it into the flat hardware config the model consumes, so
-the model still only ever sees `hw/schema.py` fields.
+the model still only ever sees `gpuTilingHWModel/schema.py` fields.
 """
 from __future__ import annotations
 

@@ -165,7 +165,7 @@ def write_excel(tl: dict, path: str, title: str = "", hw_name: str = "", full: b
     lg.append([])
     lg.append(["Assumptions (all analytical — nothing was executed on a GPU)"])
     for line in [
-        f"hardware: {hw_name}, clock {tl['clock_hz'] / 1e9:.3f} GHz (hw YAML, [calib] where tagged)",
+        f"hardware: {hw_name}, clock {tl['clock_hz'] / 1e9:.3f} GHz (GPU config YAML, [calib] where tagged)",
         f"kernel: {title}",
         "a unit is modelled as busy contiguously from the action's start",
         "loads are multi-buffered; the round they are drawn in is not the round they are used in",

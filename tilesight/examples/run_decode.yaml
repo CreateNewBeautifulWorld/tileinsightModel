@@ -1,6 +1,6 @@
-# RunConfig file:  tilesight run --model kimi_k2.hf --hw b300 --run-config examples/run_decode.yaml
+# RunConfig file:  tilesight run --model kimi_k2.hf --gpu-tiling-hw-model b300 --run-config examples/run_decode.yaml
 #
-# Tile policy is a GPU-side config, not here — see hw/schema.py's compute.tile_policy.*:
+# Tile policy is a GPU-side config, not here — see gpuTilingHWModel/schema.py's compute.tile_policy.*:
 #   tilesight run ... --set compute.tile_policy.gemm='{"bm": 128, "bn": 128, "bk": 64}' \
 #                      --set compute.tile_policy.overrides='{"*.experts_*": {"bm": 64, "bn": 256, "bk": 64, "stages": 6}}'
 phase: decode

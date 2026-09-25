@@ -17,9 +17,9 @@ The Python engine in `engine/reference.py` is the **executable spec**; C++ must 
 ## Layout
 ```
 python/tilesight/
-  hw/spec.py, hw/db/*.yaml   hardware description -> resource lanes (units matter, see DESIGN §2)
+  gpuTilingHWModel/spec.py, gpuTilingHWModel/db/*.yaml   hardware description -> resource lanes (units matter, see DESIGN §2)
                              NVIDIA b300/b200/h200 + AMD mi300x/mi325x/mi355x/mi450;
-                             dtype aliases + widening + weight-only live in hw/spec.py
+                             dtype aliases + widening + weight-only live in gpuTilingHWModel/spec.py
   ir/kernel.py               Action / Kernel / KernelResult  (engine contract)
   engine/reference.py        pipeline-envelope engine (DESIGN §3)       <- spec
   engine/cache.py            tile reuse-distance + SDCM L2 model (DESIGN §4) <- spec
@@ -52,9 +52,9 @@ pip install -e ".[dev]"                     # builds C++ via scikit-build-core +
 cmake -S . -B build && cmake --build build -j   # drops _core*.so into python/tilesight/
 PYTHONPATH=python pytest -q                     # all tests (parity tests skip if no _core)
 TILESIGHT_BACKEND=python PYTHONPATH=python pytest -q   # force reference engine
-PYTHONPATH=python python -m tilesight.cli run --model kimi_k2.hf --hw b300 --phase decode --batch 256 --seq 8192 --dp 8
-PYTHONPATH=python python -m tilesight.cli request --model kimi_k2.hf --hw b300 --run-config examples/request_kimi_b300.yaml
-PYTHONPATH=python python -m tilesight.cli sweep --model kimi_k2.hf --hw b300 --phase decode --batch 256 --seq 8192 --dp 8 \
+PYTHONPATH=python python -m tilesight.cli run --model kimi_k2.hf --gpu-tiling-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8
+PYTHONPATH=python python -m tilesight.cli request --model kimi_k2.hf --gpu-tiling-hw-model b300 --run-config examples/request_kimi_b300.yaml
+PYTHONPATH=python python -m tilesight.cli sweep --model kimi_k2.hf --gpu-tiling-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8 \
     --param memory.ddr.bandwidth_TBps --values 4,8,12,16
 PYTHONPATH=python python examples/sweep_ddr_bw_b300.py
 PYTHONPATH=python python -m tilesight.cli serve --host 0.0.0.0 --port 8000   # web UI on your machine

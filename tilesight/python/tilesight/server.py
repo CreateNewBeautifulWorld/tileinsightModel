@@ -28,17 +28,17 @@ from pathlib import Path
 
 from .dse.sweep import required_value, sweep
 from .engine import backend
-from .hw.spec import DTYPE_BYTES
+from .gpuTilingHWModel.spec import DTYPE_BYTES
 from .kernels.attention import lower_attention_decode, lower_attention_prefill
 from .kernels.gemm import lower_elementwise, lower_gemm
 from .kernels.tiles import AttnTileConfig, TileConfig, attn_search_space, gemm_search_space
-from .hw.spec import DB_DIR, HardwareSpec
+from .gpuTilingHWModel.spec import DB_DIR, HardwareSpec
 from .model.request import run_request
 from .model.run_config import RunConfig
 from .model.runner import CurModelConfig, run
 from .model.spec import PRESET_DIR, ModelSpec
 from .model.workload import WORKLOAD_FIELDS, W_SECTIONS, run_workload, validate_workload
-from .hw.slice_config import SLICE_FIELDS, derive as slice_derive, to_hardware_spec, validate_slice_config
+from .gpuTilingHWModel.slice_config import SLICE_FIELDS, derive as slice_derive, to_hardware_spec, validate_slice_config
 from .model.workload import compare_attention_impl, memory_breakdown
 from .report.archdiagram import arch_svg
 from .report.table import bound_report, model_summary, resource_class
@@ -121,7 +121,7 @@ def _load_hw(cfg: dict) -> HardwareSpec:
         if probs:
             raise ValueError("gpu config: " + "; ".join(probs[:5]))
         return to_hardware_spec(sl)
-    text = (cfg.get("hw_yaml") or "").strip()
+    text = (cfg.get("gpuTilingHWModelYaml") or "").strip()
     if text:
         import yaml as _yaml
         cur_gpu_config = HardwareSpec(_yaml.safe_load(text) or {})
@@ -129,8 +129,8 @@ def _load_hw(cfg: dict) -> HardwareSpec:
         if probs:
             raise ValueError("hardware config: " + "; ".join(probs[:5]))
     else:
-        cur_gpu_config = HardwareSpec.load(cfg.get("hw", "b300"))
-    ov = cfg.get("hw_overrides") or {}
+        cur_gpu_config = HardwareSpec.load(cfg.get("gpuTilingHWModel", "b300"))
+    ov = cfg.get("gpuTilingHWModelOverrides") or {}
     if isinstance(ov, str):
         import yaml
         ov = yaml.safe_load(ov) or {}
@@ -304,7 +304,7 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
                 del log[:-8]
     try:
         # The two configs the model actually takes. Whatever the request came from (a preset
-        # pick, a custom hw/model YAML, or the "workload" one-layer shortcut below), it's built
+        # pick, a custom gpu/model YAML, or the "workload" one-layer shortcut below), it's built
         # here and only here — the model layer downstream never sees "workload" or raw request
         # JSON, only cur_gpu_config + cur_model_config.
         cur_gpu_config = _load_hw(cfg)
@@ -343,7 +343,7 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
             if cfg.get("slice_cfg"):
                 out["derived"] = slice_derive(cfg["slice_cfg"])
             out["arch_svg"] = arch_svg(cur_gpu_config)
-            out["hw_name"] = cur_gpu_config.name
+            out["gpu_name"] = cur_gpu_config.name
             # attach the heaviest kernel's timeline so the Excel / CSV / PDF downloads work
             prog(1, 1, "building the trace of the heaviest kernel")
             ks = _top_kernels(rep, cur_gpu_config, n=1)
@@ -363,7 +363,7 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
                                {"time_us": f"{cands[0]['time_us']:.3f}", "tflops": f"{cands[0]['tflops']:.0f}",
                                 "bound": cands[0]["bound"], "occupancy": cands[0]["occupancy"]})
             cands = [{k2: v for k2, v in c.items() if k2 != "_ks"} for c in cands]
-            out = {"hw": cur_gpu_config.name, "sms": cur_gpu_config.sms, "backend": backend.BACKEND, "timeline": tl,
+            out = {"gpu_name": cur_gpu_config.name, "sms": cur_gpu_config.sms, "backend": backend.BACKEND, "timeline": tl,
                    "machine": machine_timeline(tl), "trace_text": trace,
                    "best": cands[0], "candidates": cands[:25], "tried": len(cands)}
         elif mode == "sweep":
@@ -431,7 +431,7 @@ class Handler(BaseHTTPRequestHandler):
             if tl is None:
                 return self._json(404, {"error": "no timeline for this job"})
             with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-                write_excel(tl, f.name, res.get("best", {}).get("tile", ""), res.get("hw", ""),
+                write_excel(tl, f.name, res.get("best", {}).get("tile", ""), res.get("gpu_name", ""),
                             full=q.get("full") == "1")
                 body = open(f.name, "rb").read()
             self.send_response(200)
@@ -457,9 +457,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             return self.wfile.write(body)
-        if path == "/api/hw_yaml":
+        if path == "/api/gpu_tiling_hw_model_yaml":
             q = dict(p.split("=", 1) for p in self.path.split("?", 1)[-1].split("&") if "=" in p)
-            f = DB_DIR / f"{q.get('hw', 'b300').lower()}.yaml"
+            f = DB_DIR / f"{q.get('gpuTilingHWModel', 'b300').lower()}.yaml"
             if not f.exists():
                 return self._json(404, {"error": "no such preset"})
             return self._send(200, f.read_bytes(), "text/plain; charset=utf-8")
@@ -468,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
                 {"path": f.path, "kind": f.kind, "unit": f.unit, "section": f.section,
                  "doc": f.doc, "default": f.default} for f in SLICE_FIELDS]})
         if path == "/api/schema":
-            from .hw.schema import FIELDS as HW_FIELDS
+            from .gpuTilingHWModel.schema import FIELDS as HW_FIELDS
             return self._json(200, {
                 "hardware": [{"path": f.path, "kind": f.kind, "unit": f.unit, "tag": f.tag,
                               "section": f.section, "doc": f.doc,
@@ -481,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/arch.svg":
             q = dict(p.split("=", 1) for p in self.path.split("?", 1)[-1].split("&") if "=" in p)
             try:
-                cur_gpu_config = HardwareSpec.load(q.get("hw", "b300"))
+                cur_gpu_config = HardwareSpec.load(q.get("gpuTilingHWModel", "b300"))
             except Exception as e:                      # noqa: BLE001
                 return self._json(400, {"error": str(e)})
             return self._send(200, arch_svg(cur_gpu_config).encode(), "image/svg+xml")
@@ -541,7 +541,7 @@ class Handler(BaseHTTPRequestHandler):
             if wl:
                 out["memory"] = memory_breakdown(wl)
             return self._json(200, out)
-        if self.path.split("?")[0] == "/api/validate_hw":
+        if self.path.split("?")[0] == "/api/validate_gpu_tiling_hw_model":
             import yaml as _yaml
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -549,7 +549,7 @@ class Handler(BaseHTTPRequestHandler):
                 raw = _yaml.safe_load(body.get("yaml") or "") or {}
             except Exception as e:                          # noqa: BLE001
                 return self._json(200, {"problems": [f"YAML error: {e}"], "fields": 0})
-            from .hw.schema import validate as _v
+            from .gpuTilingHWModel.schema import validate as _v
             n_set = sum(1 for _ in json.dumps(raw))
             return self._json(200, {"problems": _v(raw), "fields": len(json.dumps(raw).split(","))})
         if self.path.split("?")[0] != "/api/jobs":

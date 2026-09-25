@@ -4,9 +4,9 @@ The model says what runs on ONE GPU: one transformer layer (attention + FFN/MoE)
 dimensions and its datatypes. Multi-GPU mapping is deliberately out of scope here; this is the
 single-device view the paper models. Tile policy is NOT here: how the GPU tiles a GEMM/attention
 op is a GPU-side modelling choice, not a property of the workload — it lives in the GPU config
-(hw/schema.py's compute.tile_policy.*).
+(gpuTilingHWModel/schema.py's compute.tile_policy.*).
 
-Like hw/schema.py, this file is the single source of what a workload may contain. Fields:
+Like gpuTilingHWModel/schema.py, this file is the single source of what a workload may contain. Fields:
   attention : type (mha | gqa | mla), head counts and dims, sequence, batch, causal/window, impl
   ffn       : dense MLP or MoE (experts, top-k, shared experts, expert FFN width)
   dtypes    : weight / activation / KV / compute / expert
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..hw.spec import DTYPE_BYTES
+from ..gpuTilingHWModel.spec import DTYPE_BYTES
 
 
 @dataclass(frozen=True)

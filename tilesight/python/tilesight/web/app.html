@@ -85,8 +85,8 @@
     <button class="ghost" onclick="validateHw()">validate</button>
   </div>
   <label>Hardware YAML (the model only ever sees these fields — see /api/schema)</label>
-  <textarea id="hwyaml" style="min-height:280px"></textarea>
-  <div id="hwmsg" class="hint"></div>
+  <textarea id="gpuTilingHWModelYaml" style="min-height:280px"></textarea>
+  <div id="gpuTilingHWModelMsg" class="hint"></div>
   </div>
   <div class="row"><button class="ghost" onclick="go(1)">Back</button><button class="go" onclick="go(3)">Next</button></div>
 </section>
@@ -116,18 +116,18 @@
 <script>
 const $=id=>document.getElementById(id);
 const API=location.origin.startsWith("http")?location.origin:"http://127.0.0.1:8000";
-let OPTS=null, SCHEMA=null, SLICE=null, GPU="b300", CUSTOM=false, JOB=null, HWMODE="flat";
+let OPTS=null, SCHEMA=null, SLICE=null, GPU="b300", CUSTOM=false, JOB=null, GPU_CONFIG_MODE="flat";
 
 function go(n){
   for(let i=1;i<=5;i++){ $("p"+i).style.display = i===n?"block":"none";
     const s=$("s"+i); s.className = i===n?"on":(i<n?"done":""); }
   if(n===2){ if(!$("sliceform").innerHTML) buildSliceForm();
-             if(HWMODE==="flat" && !$("hwyaml").value.trim()) loadPreset(); }
+             if(GPU_CONFIG_MODE==="flat" && !$("gpuTilingHWModelYaml").value.trim()) loadPreset(); }
   if(n===3 && !$("wlform").innerHTML) buildWorkloadForm();
   window.scrollTo(0,0);
 }
 function setMode(m){
-  HWMODE=m;
+  GPU_CONFIG_MODE=m;
   $("sliceform").style.display = m==="slice"?"block":"none";
   $("derived").style.display = m==="slice"?"block":"none";
   $("flatbox").style.display = m==="flat"?"block":"none";
@@ -195,32 +195,32 @@ async function init(){
   SCHEMA=await (await fetch(API+"/api/schema")).json();
   SLICE=await (await fetch(API+"/api/slice_schema")).json();
   $("gpucards").innerHTML = OPTS.hardware.map(h=>
-    `<div class="card${h===GPU?' sel':''}" data-hw="${h}" onclick="pick('${h}')">
+    `<div class="card${h===GPU?' sel':''}" data-gpu="${h}" onclick="pick('${h}')">
        <b>${h.toUpperCase()}</b><span id="d_${h}">…</span></div>`).join("") +
-    `<div class="card" data-hw="custom" onclick="pick('custom')"><b>Custom GPU</b>
+    `<div class="card" data-gpu="custom" onclick="pick('custom')"><b>Custom GPU</b>
       <span>start from any preset and edit every field in step 2</span></div>`;
   OPTS.hardware.forEach(async h=>{
     const r=await fetch(API+"/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({mode:"kernel",config:{hw:h,kernel:{kernel:"gemm",M:64,N:64,K:64,tile:'{"bm":64,"bn":64,"bk":64}'}}})});
+      body:JSON.stringify({mode:"kernel",config:{gpuTilingHWModel:h,kernel:{kernel:"gemm",M:64,N:64,K:64,tile:'{"bm":64,"bn":64,"bk":64}'}}})});
     const {job_id}=await r.json();
     let j; do{ await new Promise(s=>setTimeout(s,120)); j=await (await fetch(API+"/api/jobs/"+job_id)).json(); }while(j.state==="running");
     const el=$("d_"+h); if(el&&j.result) el.textContent=`${j.result.sms} SMs · engine ${j.result.backend}`;
   });
 }
 function pick(h){ GPU = h==="custom" ? GPU : h; CUSTOM = h==="custom";
-  document.querySelectorAll(".card").forEach(c=>c.classList.toggle("sel", c.dataset.hw===h));
+  document.querySelectorAll(".card").forEach(c=>c.classList.toggle("sel", c.dataset.gpu===h));
   $("cfgnote").textContent = CUSTOM ? "Custom GPU: edit anything below. Unknown fields and missing required ones are reported by validate."
     : `Using preset ${GPU}. You can still edit it here — the model only sees this config.`;
 }
 async function loadPreset(){
-  const r=await fetch(API+"/api/hw_yaml?hw="+GPU);
-  if(r.ok) $("hwyaml").value = await r.text();
+  const r=await fetch(API+"/api/gpu_tiling_hw_model_yaml?gpuTilingHWModel="+GPU);
+  if(r.ok) $("gpuTilingHWModelYaml").value = await r.text();
 }
 async function validateHw(){
-  const r=await fetch(API+"/api/validate_hw",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({yaml:$("hwyaml").value})});
+  const r=await fetch(API+"/api/validate_gpu_tiling_hw_model",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({yaml:$("gpuTilingHWModelYaml").value})});
   const j=await r.json();
-  $("hwmsg").innerHTML = j.problems && j.problems.length
+  $("gpuTilingHWModelMsg").innerHTML = j.problems && j.problems.length
     ? `<span class="err">${j.problems.join("\n")}</span>` : `<span style="color:var(--ok)">config is valid (${j.fields} fields set)</span>`;
 }
 const WL_DEFAULTS={};
@@ -259,10 +259,10 @@ function collectWorkload(){
 }
 async function run(){
   go(4); $("log").textContent=""; $("fill").style.width="2%";
-  const cfg={hw:GPU, workload:collectWorkload()};
+  const cfg={gpuTilingHWModel:GPU, workload:collectWorkload()};
   if($("cmpattn")?.checked) cfg.compare_attention=true;
-  if(HWMODE==="slice") cfg.slice_cfg=collectSlice();
-  else { const y=$("hwyaml").value.trim(); if(y) cfg.hw_yaml=y; }
+  if(GPU_CONFIG_MODE==="slice") cfg.slice_cfg=collectSlice();
+  else { const y=$("gpuTilingHWModelYaml").value.trim(); if(y) cfg.gpuTilingHWModelYaml=y; }
   const t0=performance.now();
   try{
     const r=await fetch(API+"/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
