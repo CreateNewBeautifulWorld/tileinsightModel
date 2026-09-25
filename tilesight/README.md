@@ -158,7 +158,8 @@ a calibration placeholder), then latency/launch — raising HBM alone stops payi
 Phase C) runs on real hardware; treat absolute values as indicative, trends as the result.**
 
 Docs:
-- `docs/学习指南.md` — 中文学习文档：模型怎么算、每个配置项的作用、怎么读输出、上手练习
+- a Chinese-language learning guide at the repo root, one level above this folder — how
+  the model computes, what each config field does, how to read the output, hands-on exercises
 - `CLAUDE.md` — how to work in this repo (for Claude Code)
 - `docs/DESIGN.md` — equations, semantics, deviations from the paper
 - `docs/TASKS.md` — ordered backlog with acceptance criteria (Phase H = items from research report 02)
