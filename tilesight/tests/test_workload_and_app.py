@@ -8,10 +8,10 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from tilesight import HardwareSpec
-from tilesight.interfaceAndModelRun.workload import (WORKLOAD_FIELDS, run_workload, to_run_config,
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import (WORKLOAD_FIELDS, run_workload, to_run_config,
                                       validate_workload)
-from tilesight.generateResult.report.archdiagram import arch_svg
-from tilesight.interfaceAndModelRun.server import Handler
+from tilesight.gpuTilingPerfHWModel.genResult.archdiagram import arch_svg
+from tilesight.cli.server import Handler
 
 HW = HardwareSpec.load("b300")
 WL = {"name": "demo", "hidden": 7168, "layers": 4,
@@ -55,9 +55,9 @@ def test_arch_diagram_comes_from_the_config():
 
 
 def test_pdf_report(tmp_path):
-    from tilesight.model.kernels.gemm import lower_gemm
-    from tilesight.model.kernels.tiles import TileConfig
-    from tilesight.generateResult.report.pdfreport import unit_groups, write_pdf
+    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
+    from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+    from tilesight.gpuTilingPerfHWModel.genResult.pdfreport import unit_groups, write_pdf
     ks = lower_gemm(HW, "gemm", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
                     compute_dtype="fp8", tile=TileConfig(128, 256, 64))
     out = tmp_path / "r.pdf"
@@ -74,10 +74,10 @@ def test_pdf_report(tmp_path):
 
 def test_excel_columns_are_grouped_by_unit(tmp_path):
     from openpyxl import load_workbook
-    from tilesight.model.kernels.gemm import lower_gemm
-    from tilesight.model.kernels.tiles import TileConfig
-    from tilesight.generateResult.report.excel import write_excel
-    from tilesight.generateResult.report.timeline import steady_timeline
+    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
+    from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+    from tilesight.gpuTilingPerfHWModel.genResult.excel import write_excel
+    from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline
     k = lower_gemm(HW, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
                    compute_dtype="fp8", tile=TileConfig(128, 256, 64))[0]
     out = tmp_path / "t.xlsx"
@@ -144,7 +144,7 @@ def test_custom_gpu_yaml_is_accepted_and_validated(url):
 
 def test_slice_config_derives_and_translates():
     import yaml
-    from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.slice_config import (derive, to_hardware_spec, validate_slice_config)
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.slice_config import (derive, to_hardware_spec, validate_slice_config)
     cfg = yaml.safe_load(open("examples/slice_gpu.yaml"))
     assert validate_slice_config(cfg) == []
     d = derive(cfg)
@@ -170,8 +170,8 @@ def test_slice_config_derives_and_translates():
 
 def test_kimi_k3_preset_memory_matches_the_simulation():
     import yaml
-    from tilesight.interfaceAndModelRun.workload import memory_breakdown
-    cfg = yaml.safe_load(open("python/tilesight/interfaceAndModelRun/presets/kimi_k3_10L.yaml"))
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import memory_breakdown
+    cfg = yaml.safe_load(open("python/tilesight/modelPresets/kimi_k3_10L.yaml"))
     assert validate_workload(cfg) == []
     m = memory_breakdown(cfg)
     assert m["layers"] == 10 and "16/112" in m["sparsity"]
@@ -184,7 +184,7 @@ def test_kimi_k3_preset_memory_matches_the_simulation():
 def test_derive_endpoint_and_slice_job(url):
     import yaml
     cfg = yaml.safe_load(open("examples/slice_gpu.yaml"))
-    wl = yaml.safe_load(open("python/tilesight/interfaceAndModelRun/presets/kimi_k3_10L.yaml"))
+    wl = yaml.safe_load(open("python/tilesight/modelPresets/kimi_k3_10L.yaml"))
     req = urllib.request.Request(url + "/api/derive", method="POST",
                                  data=json.dumps({"slice_cfg": cfg, "workload": wl}).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -198,8 +198,8 @@ def test_derive_endpoint_and_slice_job(url):
 
 
 def test_model_is_organised_in_three_blocks():
-    from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.spec import lane_domain
-    from tilesight.generateResult.report.table import domain_of
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import lane_domain
+    from tilesight.gpuTilingPerfHWModel.genResult.table import domain_of
     lanes = {l.name: l for l in HW.lanes()}
     assert lanes["tc"].domain == "shader_slice" and lanes["tc"].scope == "per_core"
     assert lanes["l1"].domain == "shader_slice" and lanes["l1"].scope == "per_slice"
@@ -220,7 +220,7 @@ def test_model_is_organised_in_three_blocks():
 
 
 def test_flash_attention_is_a_choice_with_consequences():
-    from tilesight.interfaceAndModelRun.workload import compare_attention_impl
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import compare_attention_impl
     cfg = dict(WL, run={**WL["run"], "phase": "prefill", "batch": 1, "seq_len": 8192})
     c = compare_attention_impl(cfg, HW)
     assert c["flash"]["step_ms"] < c["naive"]["step_ms"]
@@ -232,10 +232,10 @@ def test_flash_attention_is_a_choice_with_consequences():
 
 
 def test_buffer_sits_between_the_slices_and_l2_behind_a_switch():
-    from tilesight.model.dse.buffer import with_buffer
-    from tilesight.model.engine import backend
-    from tilesight.model.kernels.gemm import lower_gemm
-    from tilesight.model.kernels.tiles import TileConfig
+    from tilesight.gpuTilingPerfHWModel.model.dse.buffer import with_buffer
+    from tilesight.gpuTilingPerfHWModel.model.engine import backend
+    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
+    from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
     tile = TileConfig(bm=64, bn=128, bk=64)
     plain = lower_gemm(HW, "g", 8, 16384, 7168, a_dtype="fp8", b_dtype="fp8",
                        compute_dtype="fp8", tile=tile)[0]
@@ -262,7 +262,7 @@ def test_buffer_sits_between_the_slices_and_l2_behind_a_switch():
 
 
 def test_no_l2_means_ports_straight_to_hbm_not_a_throttled_lane():
-    from tilesight.model.dse.buffer import with_buffer
+    from tilesight.gpuTilingPerfHWModel.model.dse.buffer import with_buffer
     no_l2 = HW.override({"memory.l2.capacity_MB": 0})
     lanes = {l.name: l for l in no_l2.lanes()}
     ddr_rate = no_l2.get("memory.ddr.bandwidth_TBps") * 1e12 * no_l2.eff("ddr")

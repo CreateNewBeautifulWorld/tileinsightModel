@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tilesight.interfaceAndModelRun.server import WEB_DIR, Handler
+from tilesight.cli.server import WEB_DIR, Handler
 
 
 @pytest.fixture(scope="module")

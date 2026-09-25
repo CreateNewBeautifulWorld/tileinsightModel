@@ -15,9 +15,9 @@ Quick start:
 `run_model(model, cur_gpu_config, rc)` is the lower-level, three-argument engine entry point
 that `run()` wraps; existing code and internal callers keep using it directly.
 """
-from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.spec import HardwareSpec
-from tilesight.interfaceAndModelRun.run_config import RunConfig
-from tilesight.interfaceAndModelRun.runner import CurModelConfig, run, run_model
-from tilesight.interfaceAndModelRun.spec import ModelSpec
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import HardwareSpec
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.runner import CurModelConfig, run, run_model
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.model_spec import ModelSpec
 
 __all__ = ["CurModelConfig", "HardwareSpec", "ModelSpec", "RunConfig", "run", "run_model"]

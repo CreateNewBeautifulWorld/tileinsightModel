@@ -2,11 +2,11 @@
 import math
 
 from tilesight import HardwareSpec
-from tilesight.model.engine import reference
-from tilesight.model.engine.cache import hit_prob, expected_misses
-from tilesight.model.ir.kernel import Action, Kernel
-from tilesight.model.kernels.gemm import lower_gemm
-from tilesight.model.kernels.tiles import TileConfig
+from tilesight.gpuTilingPerfHWModel.model.engine import reference
+from tilesight.gpuTilingPerfHWModel.model.engine.cache import hit_prob, expected_misses
+from tilesight.gpuTilingPerfHWModel.model.ir.kernel import Action, Kernel
+from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
+from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
 
 HW = HardwareSpec.load("b300")
 

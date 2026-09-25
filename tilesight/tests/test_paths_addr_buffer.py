@@ -2,11 +2,11 @@
 import pytest
 
 from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.model.engine import backend
-from tilesight.model.kernels.gemm import lower_gemm, occupancy
-from tilesight.model.kernels.tiles import TileConfig
-from tilesight.generateResult.report.addressing import analyze_gemm, spread, tile_index
-from tilesight.model.dse.buffer import l2_tradeoff, with_buffer
+from tilesight.gpuTilingPerfHWModel.model.engine import backend
+from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm, occupancy
+from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+from tilesight.gpuTilingPerfHWModel.genResult.addressing import analyze_gemm, spread, tile_index
+from tilesight.gpuTilingPerfHWModel.model.dse.buffer import l2_tradeoff, with_buffer
 
 HW = HardwareSpec.load("b300")
 
@@ -88,7 +88,7 @@ def test_every_unit_has_a_configurable_latency():
 
 
 def test_independent_latency_only_costs_fill_but_loop_carried_costs_throughput():
-    from tilesight.model.kernels.attention import lower_attention_decode
+    from tilesight.gpuTilingPerfHWModel.model.kernels.attention import lower_attention_decode
     slow_mma = HW.override({"compute.mma_latency_cycles": 512})
     a, b = _k(HW), _k(slow_mma)
     ra, rb = backend.evaluate(a, HW), backend.evaluate(b, slow_mma)
@@ -98,7 +98,7 @@ def test_independent_latency_only_costs_fill_but_loop_carried_costs_throughput()
     # the online-softmax chain in attention IS loop-carried: its latency hits the steady state
     def attn(cur_gpu_config):
         k = lower_attention_decode(cur_gpu_config, "a", B=32, H=64, kv_heads=1, S=8192, d_qk=576, d_v=512,
-                                   v_in_k=True, tile=__import__("tilesight").model.kernels.tiles
+                                   v_in_k=True, tile=__import__("tilesight").gpuTilingPerfHWModel.model.kernels.tiles
                                    .AttnTileConfig(block_m=64, block_n=64, stages=2, consumers=1))[0]
         return backend.evaluate(k, cur_gpu_config)
     slow_sfu = HW.override({"compute.sfu_latency_cycles": 4096})
@@ -106,7 +106,7 @@ def test_independent_latency_only_costs_fill_but_loop_carried_costs_throughput()
 
 
 def test_memory_map_allocates_every_layer_instance():
-    from tilesight.model.memmap import build_memory_map
+    from tilesight.gpuTilingPerfHWModel.model.memmap import build_memory_map
     m = ModelSpec.load("kimi_k2.hf")
     rc = RunConfig(phase="decode", batch=64, seq_len=4096, dp=8)
     mm = build_memory_map(m, rc, base=0x1000000)
@@ -124,7 +124,7 @@ def test_memory_map_allocates_every_layer_instance():
 
 
 def test_tile_addresses_follow_the_layout():
-    from tilesight.model.memmap import build_memory_map
+    from tilesight.gpuTilingPerfHWModel.model.memmap import build_memory_map
     mm = build_memory_map(ModelSpec.load("kimi_k2.hf"),
                           RunConfig(phase="decode", batch=64, seq_len=4096, dp=8), base=0)
     r = mm.find("experts_gate_up")
@@ -135,8 +135,8 @@ def test_tile_addresses_follow_the_layout():
 
 
 def test_trace_and_csv_carry_addresses():
-    from tilesight.generateResult.report.addressing import kernel_addr_fn
-    from tilesight.generateResult.report.timeline import cycle_csv, steady_timeline, trace_text
+    from tilesight.gpuTilingPerfHWModel.genResult.addressing import kernel_addr_fn
+    from tilesight.gpuTilingPerfHWModel.genResult.timeline import cycle_csv, steady_timeline, trace_text
     t = TileConfig(bm=128, bn=256, bk=64, stages=4, cluster_m=2)
     k = lower_gemm(HW, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
                    compute_dtype="fp8", tile=t)[0]
@@ -154,7 +154,7 @@ def test_trace_and_csv_carry_addresses():
 
 
 def test_address_map_modes_and_dump():
-    from tilesight.generateResult.report.addressing import AddressMap, analyze_gemm
+    from tilesight.gpuTilingPerfHWModel.genResult.addressing import AddressMap, analyze_gemm
     m = AddressMap.from_hw(HW, "l2")
     assert m.ports == 16 and m.mode == "interleave" and m.granularity == 1024 and m.addr_bits == 48
     # interleave: consecutive stripes walk the ports
@@ -177,7 +177,7 @@ def test_address_map_modes_and_dump():
 
 
 def test_granularity_changes_the_spread():
-    from tilesight.generateResult.report.addressing import analyze_gemm
+    from tilesight.gpuTilingPerfHWModel.genResult.addressing import analyze_gemm
     t = TileConfig(bm=128, bn=256, bk=64)
     fine = analyze_gemm(HW.override({"memory.addressing.l2.granularity_KB": 1}),
                         4096, 4096, 7168, t, 1.0, 1.0)
@@ -211,7 +211,7 @@ def test_dma_destination_changes_which_lanes_are_used():
 
 def test_figure3_outputs_all_three_panels(tmp_path):
     import json as _json
-    from tilesight.generateResult.report.figure3 import figure3_html, figure3_json
+    from tilesight.gpuTilingPerfHWModel.genResult.figure3 import figure3_html, figure3_json
     k = _k(HW)
     html = figure3_html(k, HW, "gemm")
     assert "(d)" in html and "(e)" in html and "(f)" in html
@@ -226,7 +226,7 @@ def test_figure3_outputs_all_three_panels(tmp_path):
 
 
 def test_sweeping_sms_scales_compute_with_it():
-    from tilesight.model.dse.sweep import default_links
+    from tilesight.gpuTilingPerfHWModel.model.dse.sweep import default_links
     f = default_links(HW, "sms")
     ch = f(2 * HW.sms)
     assert ch["compute.tc_dense_tflops.fp8"] == HW.get("compute.tc_dense_tflops.fp8") * 2
@@ -234,7 +234,7 @@ def test_sweeping_sms_scales_compute_with_it():
     assert default_links(HW, "memory.ddr.bandwidth_TBps") is None
     # with the link, a compute-bound kernel gets faster when SMs double; without it, it does not
     big = dict(kernel="gemm", M=4096, N=4096, K=7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8")
-    from tilesight.interfaceAndModelRun.server import _kernel_candidates
+    from tilesight.cli.server import _kernel_candidates
     base = _kernel_candidates(HW, big)[0]["time_us"]
     linked = _kernel_candidates(HW.override({"sms": 2 * HW.sms, **f(2 * HW.sms)}), big)[0]["time_us"]
     naive = _kernel_candidates(HW.override({"sms": 2 * HW.sms}), big)[0]["time_us"]
@@ -243,7 +243,7 @@ def test_sweeping_sms_scales_compute_with_it():
 
 
 def test_collectives_go_hierarchical_outside_the_fast_domain():
-    from tilesight.model.kernels.comm import all_to_all, allreduce
+    from tilesight.gpuTilingPerfHWModel.model.kernels.comm import all_to_all, allreduce
     d = int(HW.get("network.nvlink.domain_size"))
     inside = allreduce(HW, "ar", 256e6, d)[0]
     outside = allreduce(HW, "ar", 256e6, 2 * d)[0]
@@ -258,7 +258,7 @@ def test_collectives_go_hierarchical_outside_the_fast_domain():
 
 
 def test_l2_is_simulated_deterministically_per_partition():
-    from tilesight.model.engine.cache_sim import simulate
+    from tilesight.gpuTilingPerfHWModel.model.engine.cache_sim import simulate
     k = _k(HW)
     sim = k.meta["l2_sim"]
     assert k.meta["l2_partitions"] == HW.get("memory.l2.partitions")
@@ -302,7 +302,7 @@ def test_queueing_inflates_latency_near_saturation():
 
 
 def test_overlap_modes_hide_collectives():
-    from tilesight.interfaceAndModelRun.run_config import RunConfig as RC
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig as RC
     m = ModelSpec.load("kimi_k2.hf")
     base = dict(phase="decode", batch=128, seq_len=4096, tp=2, dp=4)
     none = run_model(m, HW, RC(overlap_mode="none", **base))
@@ -368,7 +368,7 @@ def test_lossless_mode_turns_every_modelled_loss_off():
 def test_config_is_the_only_interface_between_gpu_and_model():
     import pathlib
     import re
-    from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel import schema
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun import schema
     # 1. every shipped preset validates against the schema
     for name in ("b300", "b200", "h200", "mi300x", "mi325x", "mi355x", "mi450"):
         assert HardwareSpec.load(name).validate() == [], name

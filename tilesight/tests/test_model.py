@@ -1,5 +1,5 @@
 from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.model.memory import kv_bytes_per_token
+from tilesight.gpuTilingPerfHWModel.model.memory import kv_bytes_per_token
 
 
 def test_kimi_import_shapes():

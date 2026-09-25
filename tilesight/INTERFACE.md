@@ -1,12 +1,15 @@
 # Interface
 
 Two inputs, two schemas, one rule: **the model only ever sees config.** No device name, no
-vendor assumption and no default value lives inside `model/engine/`, `model/kernels/` or
-`model/` — a test enforces it. The package is split by role:
-`interfaceAndModelRun/` is the only thing another tool needs (the two config schemas plus
-`run()`); `model/` is the computation, reached only through `run()`; `generateResult/` turns a
-finished report into a trace, an Excel grid, a PDF, ... See `CLAUDE.md`'s Layout section for the
-full file-by-file map.
+vendor assumption and no default value lives inside `gpuTilingPerfHWModel/model/engine/`,
+`gpuTilingPerfHWModel/model/kernels/` or `gpuTilingPerfHWModel/model/` — a test enforces it.
+
+`gpuTilingPerfHWModel/` is the whole model, standalone (no b200/Kimi specifics inside it —
+those are one level up, in `gpuPresets/` and `modelPresets/`), split into three by role:
+`interfaceAndRun/` is the only thing another tool needs (the two config schemas plus `run()`);
+`model/` is the computation, reached only through `run()`; `genResult/` turns a finished report
+into a trace, an Excel grid, a PDF, ... See `CLAUDE.md`'s Layout section for the full
+file-by-file map.
 
 ```
    GPU config                                 workload config
@@ -14,21 +17,22 @@ full file-by-file map.
     including how it tiles)
         │                                            │
         ├── slice form ──────┐                       │
-        │   gpuTilingPerfHWModel/slice_config.py      │
+        │   slice_config.py  │                        │
         │        derive()    ▼                        ▼
         └── flat form ──►  HardwareSpec              ModelSpec + RunConfig
-            gpuTilingPerfHWModel/schema.py            = CurModelConfig
+            schema.py                                 = CurModelConfig
+            (hardware_spec.py)                         (model_spec.py + run_config.py)
             = cur_gpu_config                          = cur_model_config
             (incl. compute.tile_policy.* — see §3)
                     │                                        │
                     └────────►  run(cur_gpu_config, cur_model_config)  ────────►  the model
-                                interfaceAndModelRun/runner.py                    model/
+                                                                                    gpuTilingPerfHWModel/model/
 ```
 
-(`gpuTilingPerfHWModel/` lives at `interfaceAndModelRun/gpuTilingPerfHWModel/`; paths above are
+(Every file named above lives under `gpuTilingPerfHWModel/interfaceAndRun/`; paths are
 shortened for the diagram.)
 
-`run()` (`interfaceAndModelRun/runner.py`, re-exported from the package root) is the model's
+`run()` (`gpuTilingPerfHWModel/interfaceAndRun/runner.py`, re-exported from the package root) is the model's
 only entry point, and it only ever takes these two runtime-built objects. Nothing called
 "workload" reaches it: the workload config (§2) is one way to *build* a `CurModelConfig` —
 `to_model_spec()` + `to_run_config()` turn a one-layer workload dict into one — the model layer
@@ -41,7 +45,7 @@ of the workload, so it lives inside the GPU config (§3) rather than as a separa
 
 Two equivalent forms.
 
-**Flat form** (`interfaceAndModelRun/gpuTilingPerfHWModel/schema.py`, 99 fields) — a datasheet view: peaks, capacities, latencies,
+**Flat form** (`gpuTilingPerfHWModel/interfaceAndRun/schema.py`, 99 fields) — a datasheet view: peaks, capacities, latencies,
 ports. This is what the model consumes. `tilesight config --list`, `tilesight config --validate
 my_gpu.yaml`. Every field carries a tag:
 
@@ -52,7 +56,7 @@ my_gpu.yaml`. Every field carries a tag:
 | `policy` | a modelling choice, not a property of the silicon |
 | `loss` | a derating knob — **every one defaults to no loss** |
 
-**Slice form** (`interfaceAndModelRun/gpuTilingPerfHWModel/slice_config.py`, 42 fields) — an architect's view, and what the web app
+**Slice form** (`gpuTilingPerfHWModel/interfaceAndRun/slice_config.py`, 42 fields) — an architect's view, and what the web app
 asks for:
 
 - **shader core**: clock, wave32 units per core, tensor cores per core, resident waves per SIMD,
@@ -78,7 +82,7 @@ translates it into the flat form. `tilesight gpu --file my_gpu.yaml [--out flat.
 
 ## 2. Workload config
 
-`interfaceAndModelRun/workload.py`, 34 fields, **one layer on one GPU**. The model tells the simulator:
+`gpuTilingPerfHWModel/interfaceAndRun/workload.py`, 34 fields, **one layer on one GPU**. The model tells the simulator:
 
 - attention: type (`mha` / `gqa` / `mla`), `impl` (`flash` / `naive`), head counts, Q/K/V dims
   (MLA: `q_lora_rank`, `kv_lora_rank`, `qk_nope`, `qk_rope`, `v_head`), causal, sliding window
@@ -98,13 +102,13 @@ kimi-k3-10L — 10 layers, 16/112 experts per token
   total     42.79 GB
 ```
 
-Example preset: `interfaceAndModelRun/presets/kimi_k3_10L.yaml` — 10 Kimi-K3-shaped layers, flash attention,
+Example preset: `modelPresets/kimi_k3_10L.yaml` — 10 Kimi-K3-shaped layers, flash attention,
 sparse MoE. `tilesight config --workload` lists every field.
 
 ## 3. Tile policy
 
 Part of the GPU config, not the workload (`compute.tile_policy.gemm`, `compute.tile_policy.attn`
-in `interfaceAndModelRun/gpuTilingPerfHWModel/schema.py`, tag `policy`): `auto` searches the space, or give a fixed tile as JSON.
+in `gpuTilingPerfHWModel/interfaceAndRun/schema.py`, tag `policy`): `auto` searches the space, or give a fixed tile as JSON.
 `compute.tile_policy.overrides` is an fnmatch pattern on op name -> partial tile fields, checked
 first. When the GPU config fixes the attention tile (`compute.attention_tile_m/n`, which the
 slice form always sets), the model uses that tile and only searches the pipeline knobs around it.
@@ -169,7 +173,7 @@ shader-bound to memory-bound. `compare_attention_impl()` runs both; the web app 
 
 ```bash
 tilesight gpu --file examples/slice_gpu.yaml \
-              --workload python/tilesight/interfaceAndModelRun/presets/kimi_k3_10L.yaml   # derived numbers
+              --workload python/tilesight/modelPresets/kimi_k3_10L.yaml   # derived numbers
 tilesight serve --host 0.0.0.0 --port 8000                                  # the 5-step web app
 ```
 

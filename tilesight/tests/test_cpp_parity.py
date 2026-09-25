@@ -4,10 +4,10 @@ import random
 import pytest
 
 from tilesight import HardwareSpec, ModelSpec, RunConfig
-from tilesight.model.engine import cache as pycache
-from tilesight.model.engine import reference
-from tilesight.model.lower import lower_model
-from tilesight.interfaceAndModelRun import runner
+from tilesight.gpuTilingPerfHWModel.model.engine import cache as pycache
+from tilesight.gpuTilingPerfHWModel.model.engine import reference
+from tilesight.gpuTilingPerfHWModel.model.lower import lower_model
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun import runner
 
 core = pytest.importorskip("tilesight._core")
 
@@ -32,7 +32,7 @@ def test_cache_parity():
 
 @pytest.mark.parametrize("phase", ["decode", "prefill"])
 def test_engine_parity_on_kimi(phase):
-    from tilesight.model.engine.cpp_bridge import evaluate_cpp
+    from tilesight.gpuTilingPerfHWModel.model.engine.cpp_bridge import evaluate_cpp
     cur_gpu_config = HardwareSpec.load("b300")
     m = ModelSpec.load("kimi_k2.hf")
     rc = RunConfig(phase=phase, batch=64 if phase == "decode" else 8, seq_len=4096, dp=8)
@@ -43,9 +43,9 @@ def test_engine_parity_on_kimi(phase):
             for kr in ks:
                 pass
     # re-lower a sample of kernels and compare engines directly
-    from tilesight.model.kernels.gemm import lower_gemm
-    from tilesight.model.kernels.tiles import gemm_search_space
-    from tilesight.model.kernels.attention import lower_attention_decode, lower_attention_prefill
+    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
+    from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import gemm_search_space
+    from tilesight.gpuTilingPerfHWModel.model.kernels.attention import lower_attention_decode, lower_attention_prefill
     for k in (lower_attention_decode(cur_gpu_config, "a", B=16, H=64, kv_heads=1, S=8192, d_qk=576, d_v=512, v_in_k=True)
               + lower_attention_prefill(cur_gpu_config, "p", B=1, H=8, kv_heads=1, S=8192, d_qk=128, d_v=128)):
         p, c = reference.evaluate(k, cur_gpu_config), evaluate_cpp(core, k, cur_gpu_config)
