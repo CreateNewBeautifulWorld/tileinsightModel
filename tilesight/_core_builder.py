@@ -10,6 +10,7 @@ Standalone on purpose (stdlib only at module scope): this file is loaded two way
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,16 @@ def ensure_core_built(status_cb=None) -> None:
         pass
 
     build_dir = ROOT / "build"
+    # A stale build/ from an earlier attempt (interrupted build, or configured against a
+    # different Python interpreter) can leave CMakeCache.txt pinned to that old interpreter's
+    # paths/ABI — cmake doesn't reliably pick up a new -DPython_EXECUTABLE over an already-cached
+    # find_package(Python) result, so it can report success while producing a .so for the wrong
+    # Python, or none where expected ("No module named tilesight._core" even though the build
+    # step exited 0). Since we only get here when _core isn't importable, there's nothing worth
+    # keeping in build/ anyway — always start clean.
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+
     msg = "building the C++ core (first run, ~1-2 min)..."
     print(f"tilesight: {msg}", file=sys.stderr)
     report("building", msg)
@@ -44,7 +55,8 @@ def ensure_core_built(status_cb=None) -> None:
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         err = (
             "C++ build failed. Install a C++17 compiler and cmake, or build manually with "
-            f"`cmake -S . -B build && cmake --build build -j` from {ROOT}. Underlying error: {e}"
+            f"`rm -rf build && cmake -S . -B build && cmake --build build -j` from {ROOT}. "
+            f"Underlying error: {e}"
         )
         report("error", err)
         raise ImportError(f"tilesight: {err}") from e
@@ -54,6 +66,13 @@ def ensure_core_built(status_cb=None) -> None:
     try:
         import tilesight._core  # noqa: F401
     except ImportError as e:
-        report("error", str(e))
-        raise
+        found = sorted(str(p) for p in ROOT.glob("_core*"))
+        err = (
+            f"cmake reported success but tilesight._core still won't import for "
+            f"{sys.executable}. Files matching _core* at {ROOT}: {found or 'none'}. "
+            f"This usually means a mismatched Python between cmake and this interpreter — "
+            f"try `rm -rf build` and re-run. Underlying error: {e}"
+        )
+        report("error", err)
+        raise ImportError(f"tilesight: {err}") from e
     report("ready")
