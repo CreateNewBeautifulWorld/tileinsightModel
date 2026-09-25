@@ -48,10 +48,14 @@ def ensure_core_built(status_cb=None) -> None:
     try:
         subprocess.run(
             ["cmake", "-S", str(ROOT), "-B", str(build_dir),
-             f"-DPython_EXECUTABLE={sys.executable}"],
+             f"-DPython_EXECUTABLE={sys.executable}", "-DCMAKE_BUILD_TYPE=Release"],
             check=True,
         )
-        subprocess.run(["cmake", "--build", str(build_dir), "-j"], check=True)
+        # --config only matters to a multi-config generator (Visual Studio, Xcode) — a
+        # single-config one (Makefiles, Ninja) ignores it and uses CMAKE_BUILD_TYPE above. Without
+        # it, a multi-config generator defaults to Debug and drops the build under build/Debug/
+        # instead of CMakeLists.txt's chosen output dir.
+        subprocess.run(["cmake", "--build", str(build_dir), "-j", "--config", "Release"], check=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         err = (
             "C++ build failed. Install a C++17 compiler and cmake, or build manually with "
