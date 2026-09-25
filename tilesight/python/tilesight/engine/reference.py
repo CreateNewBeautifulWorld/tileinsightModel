@@ -85,16 +85,16 @@ def _phase(actions: list[Action], lanes: list[Lane], active: int, bps: int,
     return cp, "latency", _latency_detail(actions, w, lanes, active)
 
 
-def evaluate(k: Kernel, hw: HardwareSpec) -> KernelResult:
-    lanes = hw.lanes()
-    launch = hw.launch_s
+def evaluate(k: Kernel, cur_gpu_config: HardwareSpec) -> KernelResult:
+    lanes = cur_gpu_config.lanes()
+    launch = cur_gpu_config.launch_s
     if k.fixed_time_s is not None:          # communication kernels
         return KernelResult(k.name, k.kind, k.fixed_time_s + launch, "net",
                             {"net": 1.0}, {"comm": k.fixed_time_s, "launch": launch},
                             {"net": k.fixed_time_s, "launch": launch}, 0, k.meta,
                             {f"net:{k.meta.get('algo', 'comm')}": k.fixed_time_s, "launch": launch})
 
-    sms = hw.sms
+    sms = cur_gpu_config.sms
     resident = max(1, k.resident)
     conc = sms * resident
     full, tail = divmod(k.num_blocks, conc)
@@ -113,8 +113,8 @@ def evaluate(k: Kernel, hw: HardwareSpec) -> KernelResult:
         # queueing: a shared lane close to saturation does not just run out of bandwidth, it
         # also makes every access wait. M/D/1 waiting time W = u/(2(1-u)) * S, applied as a
         # latency multiplier (throughput is already capped by the resource bound).
-        qc = float(hw.get("memory.queueing.coef") or 0.0)
-        qmax = float(hw.get("memory.queueing.max_factor") or 3.0)
+        qc = float(cur_gpu_config.get("memory.queueing.coef") or 0.0)
+        qmax = float(cur_gpu_config.get("memory.queueing.max_factor") or 3.0)
         qf = 1.0
         if qc > 0:
             base = max(rb, 1e-18)

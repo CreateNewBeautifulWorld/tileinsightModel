@@ -12,11 +12,11 @@ from ..hw.spec import HardwareSpec
 from ..ir.kernel import Kernel
 
 
-def _link(hw: HardwareSpec, group: int) -> tuple[float, float]:
-    nv = hw.get("network.nvlink")
+def _link(cur_gpu_config: HardwareSpec, group: int) -> tuple[float, float]:
+    nv = cur_gpu_config.get("network.nvlink")
     if group <= int(nv["domain_size"]):
         return nv["alpha_us"] * 1e-6, nv["bandwidth_GBps"] * 1e9
-    so = hw.get("network.scaleout")
+    so = cur_gpu_config.get("network.scaleout")
     return so["alpha_us"] * 1e-6, so["bandwidth_GBps"] * 1e9
 
 
@@ -30,7 +30,7 @@ def _flat(a: float, bw: float, nbytes: float, group: int, algo: str = "auto"):
     return (ring, "ring") if algo == "ring" else (rd, "recursive_doubling")
 
 
-def allreduce(hw: HardwareSpec, name: str, nbytes: float, group: int, algo: str = "auto") -> list[Kernel]:
+def allreduce(cur_gpu_config: HardwareSpec, name: str, nbytes: float, group: int, algo: str = "auto") -> list[Kernel]:
     """Flat inside the fast domain, hierarchical beyond it.
 
     Once the group leaves the NVLink/UALink domain, a real library does not run one slow ring
@@ -39,15 +39,15 @@ def allreduce(hw: HardwareSpec, name: str, nbytes: float, group: int, algo: str 
     overestimates an ep=16 all-reduce by ~5x."""
     if group <= 1 or nbytes <= 0:
         return []
-    d = int(hw.get("network.nvlink.domain_size"))
+    d = int(cur_gpu_config.get("network.nvlink.domain_size"))
     if group <= d:
-        a, bw = _link(hw, group)
+        a, bw = _link(cur_gpu_config, group)
         t, used = _flat(a, bw, nbytes, group, algo)
         return [Kernel(name, "comm", 0, 0, 1, 1, [], meta=dict(bytes=nbytes, group=group, algo=used),
                        fixed_time_s=t)]
     nodes = math.ceil(group / d)
-    ai, bwi = _link(hw, d)                     # intra-node (fast domain)
-    ao, bwo = _link(hw, group)                 # inter-node (scale-out)
+    ai, bwi = _link(cur_gpu_config, d)                     # intra-node (fast domain)
+    ao, bwo = _link(cur_gpu_config, group)                 # inter-node (scale-out)
     rs = (d - 1) * ai + (d - 1) / d * nbytes / bwi          # reduce-scatter inside the node
     inter, _ = _flat(ao, bwo, nbytes / d, nodes)            # all-reduce the shard between nodes
     ag = rs                                                 # all-gather inside the node
@@ -57,20 +57,20 @@ def allreduce(hw: HardwareSpec, name: str, nbytes: float, group: int, algo: str 
                    fixed_time_s=rs + inter + ag)]
 
 
-def all_to_all(hw: HardwareSpec, name: str, send_bytes: float, group: int) -> list[Kernel]:
+def all_to_all(cur_gpu_config: HardwareSpec, name: str, send_bytes: float, group: int) -> list[Kernel]:
     """send_bytes = bytes this GPU sends in total (to all peers)."""
     if group <= 1 or send_bytes <= 0:
         return []
-    d = int(hw.get("network.nvlink.domain_size"))
+    d = int(cur_gpu_config.get("network.nvlink.domain_size"))
     if group <= d:
-        a, bw = _link(hw, group)
+        a, bw = _link(cur_gpu_config, group)
         t = a * math.ceil(math.log2(group)) + send_bytes * (group - 1) / group / bw
         return [Kernel(name, "comm", 0, 0, 1, 1, [],
                        meta=dict(bytes=send_bytes, group=group, algo="a2a"), fixed_time_s=t)]
     # hierarchical: only the fraction leaving the node crosses the slow fabric
     nodes = math.ceil(group / d)
-    ai, bwi = _link(hw, d)
-    ao, bwo = _link(hw, group)
+    ai, bwi = _link(cur_gpu_config, d)
+    ao, bwo = _link(cur_gpu_config, group)
     intra = ai * math.ceil(math.log2(d)) + send_bytes * (d - 1) / group / bwi
     inter = ao + send_bytes * (group - d) / group / bwo
     return [Kernel(name, "comm", 0, 0, 1, 1, [],

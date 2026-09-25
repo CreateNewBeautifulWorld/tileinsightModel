@@ -128,9 +128,9 @@ def _panel_f(res, k: Kernel, tl: dict) -> str:
 </div>"""
 
 
-def figure3_html(k: Kernel, hw: HardwareSpec, title: str = "", addr_fn=None) -> str:
-    tl = steady_timeline(k, hw, addr_fn=addr_fn)
-    res = backend.evaluate(k, hw)
+def figure3_html(k: Kernel, cur_gpu_config: HardwareSpec, title: str = "", addr_fn=None) -> str:
+    tl = steady_timeline(k, cur_gpu_config, addr_fn=addr_fn)
+    res = backend.evaluate(k, cur_gpu_config)
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>TileSight — {html.escape(title or k.name)}</title><style>
 body{{font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:24px;
@@ -147,17 +147,17 @@ svg{{background:#fff;border:1px solid #e3e1dd;border-radius:8px}}
 @media(max-width:800px){{.cols{{grid-template-columns:1fr}}}}
 </style></head><body>
 <h1>{html.escape(title or k.name)}</h1>
-<div class="note">{hw.name} · {hw.sms} SMs · {hw.clock_hz / 1e9:.2f} GHz · analytical model, nothing was executed</div>
+<div class="note">{cur_gpu_config.name} · {cur_gpu_config.sms} SMs · {cur_gpu_config.clock_hz / 1e9:.2f} GHz · analytical model, nothing was executed</div>
 {_panel_d(k, tl)}{_panel_e(tl)}{_panel_f(res, k, tl)}
 <p class="note">Panels follow Figure 3(d)(e)(f) of the TileSight paper. Values marked [calib] in
 the hardware YAML are placeholders until the microbenchmark suite runs on real silicon.</p>
 </body></html>"""
 
 
-def figure3_json(k: Kernel, hw: HardwareSpec) -> str:
+def figure3_json(k: Kernel, cur_gpu_config: HardwareSpec) -> str:
     """Same three panels as data, for pipelines that want the numbers rather than the page."""
-    tl = steady_timeline(k, hw)
-    res = backend.evaluate(k, hw)
+    tl = steady_timeline(k, cur_gpu_config)
+    res = backend.evaluate(k, cur_gpu_config)
     return json.dumps({
         "d": {"actions": [{"name": a.name, "work": a.work, "deps": a.deps,
                            "latency_cycles": a.latency_s * tl["clock_hz"], "recurrent": a.recurrent}

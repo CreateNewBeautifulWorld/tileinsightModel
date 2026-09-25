@@ -17,7 +17,7 @@ class TileConfig:
     stages: int = 0            # 0 -> max that fits in SMEM (capped at 8)
     swizzle: int = 8           # grouped raster: GROUP_M block rows
     split_k: int = 1
-    load_path: str = "tma"     # key into hw.load_paths; "split:tma=0.7,lsu=0.3" also allowed
+    load_path: str = "tma"     # key into cur_gpu_config.load_paths; "split:tma=0.7,lsu=0.3" also allowed
     cluster_m: int = 1         # CTAs along M sharing B via TMA multicast (thread-block cluster)
     cta_pair: bool = False     # 2-CTA MMA (Blackwell tcgen05 cta_group::2); requires cluster_m == 2
 

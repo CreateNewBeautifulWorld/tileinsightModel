@@ -91,7 +91,7 @@ PYTHONPATH=python python -m tilesight.cli serve --host 0.0.0.0 --port 8000   # w
   `load_paths_default`), and add it to `tests/test_dtypes_amd.py`'s preset list.
 - **New datatype**: add bytes to `DTYPE_BYTES`, an alias in `DTYPE_ALIAS` if it runs on an existing
   datapath, `WEIGHT_ONLY` if the MMA runs wider, and a peak entry in each hardware table.
-- **New hardware knob**: add to YAML (tagged) → read via `hw.get("a.b.c")` in the lowering
+- **New hardware knob**: add to YAML (tagged) → read via `cur_gpu_config.get("a.b.c")` in the lowering
   → if it is a new resource, add it in `HardwareSpec.lanes()` (C++ needs nothing: lanes
   are data). Add a DSE example if it is a design parameter.
 - **New on-chip memory** (e.g. DSMEM, larger SRAM): add under `memory.onchip.<name>` with

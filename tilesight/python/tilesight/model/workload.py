@@ -234,7 +234,7 @@ def memory_breakdown(cfg: dict) -> dict:
     }
 
 
-def compare_attention_impl(cfg: dict, hw) -> dict:
+def compare_attention_impl(cfg: dict, cur_gpu_config) -> dict:
     """Run the same workload with and without flash attention.
 
     Flash keeps S and P on chip; the naive path writes the score matrix to HBM and reads it
@@ -244,7 +244,7 @@ def compare_attention_impl(cfg: dict, hw) -> dict:
     out = {}
     for impl in ("flash", "naive"):
         c = {**cfg, "attention": {**(cfg.get("attention") or {}), "impl": impl}}
-        rep = run_workload(c, hw)
+        rep = run_workload(c, cur_gpu_config)
         attn = sum(o.total_s for o in rep.ops
                    if ".attn" in o.op.name and "allreduce" not in o.op.name)
         out[impl] = {"step_ms": rep.step_time_s * 1e3, "attention_ms": attn * 1e3,

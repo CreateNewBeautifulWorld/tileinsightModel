@@ -33,30 +33,30 @@ def test_cache_parity():
 @pytest.mark.parametrize("phase", ["decode", "prefill"])
 def test_engine_parity_on_kimi(phase):
     from tilesight.engine.cpp_bridge import evaluate_cpp
-    hw = HardwareSpec.load("b300")
+    cur_gpu_config = HardwareSpec.load("b300")
     m = ModelSpec.load("kimi_k2.hf")
     rc = RunConfig(phase=phase, batch=64 if phase == "decode" else 8, seq_len=4096, dp=8)
     n = 0
     for _, _, ops in lower_model(m, rc):
         for op in ops:
-            ks, _ = runner.resolve_op(op, hw, rc)
+            ks, _ = runner.resolve_op(op, cur_gpu_config, rc)
             for kr in ks:
                 pass
     # re-lower a sample of kernels and compare engines directly
     from tilesight.kernels.gemm import lower_gemm
     from tilesight.kernels.tiles import gemm_search_space
     from tilesight.kernels.attention import lower_attention_decode, lower_attention_prefill
-    for k in (lower_attention_decode(hw, "a", B=16, H=64, kv_heads=1, S=8192, d_qk=576, d_v=512, v_in_k=True)
-              + lower_attention_prefill(hw, "p", B=1, H=8, kv_heads=1, S=8192, d_qk=128, d_v=128)):
-        p, c = reference.evaluate(k, hw), evaluate_cpp(core, k, hw)
+    for k in (lower_attention_decode(cur_gpu_config, "a", B=16, H=64, kv_heads=1, S=8192, d_qk=576, d_v=512, v_in_k=True)
+              + lower_attention_prefill(cur_gpu_config, "p", B=1, H=8, kv_heads=1, S=8192, d_qk=128, d_v=128)):
+        p, c = reference.evaluate(k, cur_gpu_config), evaluate_cpp(core, k, cur_gpu_config)
         assert _rel(p.time_s, c.time_s) < 1e-9 and p.limiter_detail.keys() == c.limiter_detail.keys()
     for M, N, K in [(8, 7168, 2048), (4096, 4096, 7168), (1, 163840, 7168)]:
         for t in gemm_search_space(M, N, K)[::5]:
-            ks = lower_gemm(hw, "g", M, N, K, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)
+            ks = lower_gemm(cur_gpu_config, "g", M, N, K, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)
             if not ks:
                 continue
             for k in ks:
-                p, c = reference.evaluate(k, hw), evaluate_cpp(core, k, hw)
+                p, c = reference.evaluate(k, cur_gpu_config), evaluate_cpp(core, k, cur_gpu_config)
                 assert _rel(p.time_s, c.time_s) < 1e-9
                 assert p.bottleneck == c.bottleneck
                 for lane, v in p.util.items():

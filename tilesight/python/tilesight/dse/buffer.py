@@ -27,33 +27,33 @@ from ..model.runner import run_model
 from ..model.spec import ModelSpec
 
 
-def with_buffer(hw: HardwareSpec, capacity_MB: float, *, bandwidth_TBps: float | None = None,
+def with_buffer(cur_gpu_config: HardwareSpec, capacity_MB: float, *, bandwidth_TBps: float | None = None,
                 policy: str = "cache", pin: dict | None = None, latency_ns: float = 400,
                 assoc: int = 16, efficiency: float = 0.9, bypass_l2: bool = False,
                 prefetch: bool = False, costream: bool = False) -> HardwareSpec:
-    """Return `hw` with an extra on-chip shared buffer configured."""
+    """Return `cur_gpu_config` with an extra on-chip shared buffer configured."""
     if capacity_MB <= 0:
-        raw = {k: v for k, v in hw.raw.items()}
+        raw = {k: v for k, v in cur_gpu_config.raw.items()}
         mem = dict(raw.get("memory", {}))
         mem.pop("sram", None)
         raw["memory"] = mem
         return HardwareSpec(raw)
-    bw = bandwidth_TBps if bandwidth_TBps is not None else hw.get("memory.l2.bandwidth_TBps", 15.0)
+    bw = bandwidth_TBps if bandwidth_TBps is not None else cur_gpu_config.get("memory.l2.bandwidth_TBps", 15.0)
     sram = {"capacity_MB": capacity_MB, "effective_capacity_MB": capacity_MB,
             "bandwidth_TBps": bw, "latency_ns": latency_ns, "assoc": assoc,
-            "per_sm_max_GBps": hw.get("memory.l2.per_sm_max_GBps", 180), "policy": policy,
+            "per_sm_max_GBps": cur_gpu_config.get("memory.l2.per_sm_max_GBps", 180), "policy": policy,
             "bypass_l2": bypass_l2, "prefetch": prefetch, "costream": costream}
     if pin:
         sram["pin"] = pin
-    return hw.override({"memory.sram": sram, "efficiency.sram": efficiency})
+    return cur_gpu_config.override({"memory.sram": sram, "efficiency.sram": efficiency})
 
 
-def capacity_curve(model: ModelSpec, hw: HardwareSpec, rc: RunConfig,
+def capacity_curve(model: ModelSpec, cur_gpu_config: HardwareSpec, rc: RunConfig,
                    capacities_MB=(0, 32, 64, 128, 256, 512, 1024, 2048, 4096), **kw):
     rows = []
-    l2 = hw.get("memory.l2.capacity_MB", 1)
+    l2 = cur_gpu_config.get("memory.l2.capacity_MB", 1)
     for cap in capacities_MB:
-        h = with_buffer(hw, cap, **kw) if cap else with_buffer(hw, 0)
+        h = with_buffer(cur_gpu_config, cap, **kw) if cap else with_buffer(cur_gpu_config, 0)
         rep = run_model(model, h, rc)
         rows.append({"capacity_MB": cap, "x_L2": round(cap / l2, 2), "step_ms": rep.step_time_s * 1e3,
                      "tok_s_gpu": rep.tokens_per_s_per_gpu,
@@ -64,7 +64,7 @@ def capacity_curve(model: ModelSpec, hw: HardwareSpec, rc: RunConfig,
     return rows
 
 
-def optimize_buffer(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, capacity_MB: float,
+def optimize_buffer(model: ModelSpec, cur_gpu_config: HardwareSpec, rc: RunConfig, capacity_MB: float,
                     steps: int = 4, classes=("weight", "kv", "act"), progress=None, **kw):
     """Grid-search the pin shares (plus the shared-cache policy) at a fixed capacity.
 
@@ -80,14 +80,14 @@ def optimize_buffer(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, capacity_
     for i, (policy, pin, byp, pre, cos) in enumerate(cands):
         if progress:
             progress(i, len(cands), f"{policy} {pin or ''} bypass={byp} prefetch={pre} costream={cos}")
-        h = with_buffer(hw, capacity_MB, policy=policy, pin=pin, bypass_l2=byp, prefetch=pre,
+        h = with_buffer(cur_gpu_config, capacity_MB, policy=policy, pin=pin, bypass_l2=byp, prefetch=pre,
                         costream=cos, **kw)
         rep = run_model(model, h, rc)
         rows.append({"policy": policy, **{f"pin_{c}": (pin or {}).get(c, "") for c in classes},
                      "bypass_l2": byp, "prefetch": pre, "costream": cos,
                      "step_ms": rep.step_time_s * 1e3, "tok_s_gpu": rep.tokens_per_s_per_gpu,
                      "top_bound": next(iter(rep.detail_breakdown()), "-")})
-    none_ms = run_model(model, with_buffer(hw, 0), rc).step_time_s * 1e3
+    none_ms = run_model(model, with_buffer(cur_gpu_config, 0), rc).step_time_s * 1e3
     for r in rows:
         r["speedup_vs_no_buffer"] = round(none_ms / r["step_ms"], 3)
     rows.sort(key=lambda r: r["step_ms"])
@@ -106,10 +106,10 @@ def _class_of(op) -> str:
     return "act"
 
 
-def profile_classes(model: ModelSpec, hw: HardwareSpec, rc: RunConfig) -> dict:
+def profile_classes(model: ModelSpec, cur_gpu_config: HardwareSpec, rc: RunConfig) -> dict:
     """Per-class HBM traffic per step and footprint per GPU — the closed form's inputs."""
-    rep = run_model(model, with_buffer(hw, 0), rc)
-    ddr_rate = hw.get("memory.ddr.bandwidth_TBps") * 1e12 * hw.eff("ddr")
+    rep = run_model(model, with_buffer(cur_gpu_config, 0), rc)
+    ddr_rate = cur_gpu_config.get("memory.ddr.bandwidth_TBps") * 1e12 * cur_gpu_config.eff("ddr")
     traffic = dict.fromkeys(CLASSES, 0.0)
     for o in rep.ops:
         for k in o.kernels:
@@ -142,7 +142,7 @@ def best_alloc(prof: dict, capacity_MB: float) -> dict:
             "order": sorted(CLASSES, key=lambda c: -prof["value_per_byte"][c])}
 
 
-def l2_tradeoff(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, total_MB: float,
+def l2_tradeoff(model: ModelSpec, cur_gpu_config: HardwareSpec, rc: RunConfig, total_MB: float,
                 buffer_shares=(0.0, 0.25, 0.5, 0.75, 0.9, 0.97), bw_per_MB: float | None = None,
                 progress=None, **kw):
     """Spend a fixed on-chip SRAM budget on L2 vs the shared buffer.
@@ -151,8 +151,8 @@ def l2_tradeoff(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, total_MB: flo
     scaled with capacity (`bw_per_MB`, default: keep the part's L2 bandwidth density), so a
     smaller L2 is also proportionally narrower — which is what makes this a real trade.
     """
-    l2_mb = hw.get("memory.l2.capacity_MB")
-    l2_bw = hw.get("memory.l2.bandwidth_TBps")
+    l2_mb = cur_gpu_config.get("memory.l2.capacity_MB")
+    l2_bw = cur_gpu_config.get("memory.l2.bandwidth_TBps")
     dens = bw_per_MB if bw_per_MB is not None else l2_bw / l2_mb
     rows = []
     for i, share in enumerate(buffer_shares):
@@ -160,7 +160,7 @@ def l2_tradeoff(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, total_MB: flo
             progress(i, len(buffer_shares), f"buffer share {share:.0%}")
         buf_mb = total_MB * share
         new_l2 = max(1.0, total_MB - buf_mb)
-        h = hw.override({"memory.l2.capacity_MB": new_l2,
+        h = cur_gpu_config.override({"memory.l2.capacity_MB": new_l2,
                          "memory.l2.effective_capacity_MB": new_l2 * 0.66,
                          "memory.l2.bandwidth_TBps": max(0.5, dens * new_l2)})
         if buf_mb > 0:

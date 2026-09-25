@@ -23,14 +23,14 @@ from ..hw.spec import HardwareSpec
 from ..ir.kernel import Kernel
 
 
-def steady_timeline(k: Kernel, hw: HardwareSpec, max_rounds: int = 0, addr_fn=None) -> dict:
+def steady_timeline(k: Kernel, cur_gpu_config: HardwareSpec, max_rounds: int = 0, addr_fn=None) -> dict:
     """max_rounds = 0 -> stages+1 rounds, so a load and the MMA that consumes it both appear."""
     max_rounds = max_rounds or min(8, k.stages + 1)
-    lanes = hw.lanes()
+    lanes = cur_gpu_config.lanes()
     resident = max(1, k.resident)
-    conc = hw.sms * resident
+    conc = cur_gpu_config.sms * resident
     blocks = min(k.num_blocks, conc) or 1
-    active = min(hw.sms, math.ceil(blocks / resident))
+    active = min(cur_gpu_config.sms, math.ceil(blocks / resident))
     bps = math.ceil(blocks / active)
 
     def is_load(a):
@@ -76,7 +76,7 @@ def steady_timeline(k: Kernel, hw: HardwareSpec, max_rounds: int = 0, addr_fn=No
     pro, pro_len = sched(k.prologue)
     epi, epi_len = sched(k.epilogue)
     full, tail = divmod(k.num_blocks, conc)
-    clock = hw.clock_hz
+    clock = cur_gpu_config.clock_hz
     if addr_fn is not None:                       # attach the tile address each action touches
         for it in body_items + steady + pro + epi:
             a = addr_fn(it["action"], it.get("iteration", it.get("round", 0)))
@@ -96,8 +96,8 @@ def steady_timeline(k: Kernel, hw: HardwareSpec, max_rounds: int = 0, addr_fn=No
         "resident": resident, "blocks_per_sm": bps, "active_sms": active,
         # how the grid maps onto the machine (paper §3.4: WaveDecompose; one representative SM
         # is modeled, waves are aggregated, the tail wave gets a bigger share of L2/DDR)
-        "num_blocks": k.num_blocks, "sms": hw.sms, "full_waves": full,
-        "tail_blocks": tail, "tail_active_sms": min(hw.sms, math.ceil(tail / resident)) if tail else 0,
+        "num_blocks": k.num_blocks, "sms": cur_gpu_config.sms, "full_waves": full,
+        "tail_blocks": tail, "tail_active_sms": min(cur_gpu_config.sms, math.ceil(tail / resident)) if tail else 0,
         "limiter": limiter, "resource_bound_s": rb, "latency_bound_s": lat_bound,
         "cp_s": cp, "cp_recurrent_s": cp_rec,
         "prologue_s": pro_len, "epilogue_s": epi_len,

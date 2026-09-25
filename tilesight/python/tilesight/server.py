@@ -49,7 +49,7 @@ WEB_DIR = Path(__file__).parent / "web"
 _KERNELS: dict = {}
 
 
-def _top_kernels(rep, hw, n: int = 3):
+def _top_kernels(rep, cur_gpu_config, n: int = 3):
     """Re-lower the heaviest ops so the PDF can show their timelines."""
     from .model.runner import resolve_op
     out = []
@@ -64,12 +64,12 @@ def _top_kernels(rep, hw, n: int = 3):
             tile_s = o.tile.split("/")[0]
             if o.op.kind == "gemm":
                 bm, bn, bk = (int(x) for x in tile_s.split("x"))
-                ks = lower_gemm(hw, o.op.name, p["M"], p["N"], p["K"], batch=p["batch"],
+                ks = lower_gemm(cur_gpu_config, o.op.name, p["M"], p["N"], p["K"], batch=p["batch"],
                                 a_dtype=p["a_dtype"], b_dtype=p["b_dtype"], c_dtype=p["c_dtype"],
                                 compute_dtype=p["compute_dtype"], tile=TileConfig(bm, bn, bk))
             else:
                 fn = lower_attention_decode if o.op.kind == "attn_decode" else lower_attention_prefill
-                ks = fn(hw, o.op.name, B=p["B"], H=p["H"], kv_heads=p["kv_heads"], S=p["S"],
+                ks = fn(cur_gpu_config, o.op.name, B=p["B"], H=p["H"], kv_heads=p["kv_heads"], S=p["S"],
                         d_qk=p["d_qk"], d_v=p["d_v"], tile=AttnTileConfig(),
                         **({"v_in_k": p["v_in_k"]} if o.op.kind == "attn_decode" else {}))
             if ks:
@@ -124,12 +124,12 @@ def _load_hw(cfg: dict) -> HardwareSpec:
     text = (cfg.get("hw_yaml") or "").strip()
     if text:
         import yaml as _yaml
-        hw = HardwareSpec(_yaml.safe_load(text) or {})
-        probs = hw.validate()
+        cur_gpu_config = HardwareSpec(_yaml.safe_load(text) or {})
+        probs = cur_gpu_config.validate()
         if probs:
             raise ValueError("hardware config: " + "; ".join(probs[:5]))
     else:
-        hw = HardwareSpec.load(cfg.get("hw", "b300"))
+        cur_gpu_config = HardwareSpec.load(cfg.get("hw", "b300"))
     ov = cfg.get("hw_overrides") or {}
     if isinstance(ov, str):
         import yaml
@@ -145,7 +145,7 @@ def _load_hw(cfg: dict) -> HardwareSpec:
             v = json.loads(v)
         if v not in (None, "", {}):
             ov[path] = v
-    return hw.override(ov) if ov else hw
+    return cur_gpu_config.override(ov) if ov else cur_gpu_config
 
 
 def _run_config(cfg: dict) -> RunConfig:
@@ -193,7 +193,7 @@ def _model_json(rep) -> dict:
 
 
 # ------------------------------------------------------------------ single-GPU kernel mode
-def _kernel_candidates(hw: HardwareSpec, k: dict, progress=None):
+def _kernel_candidates(cur_gpu_config: HardwareSpec, k: dict, progress=None):
     """Evaluate one kernel on ONE GPU over a tile search space; return ranked candidates."""
     kind = k.get("kernel", "gemm")
     fixed = (k.get("tile") or "auto").strip()
@@ -212,11 +212,11 @@ def _kernel_candidates(hw: HardwareSpec, k: dict, progress=None):
         for i, t in enumerate(tiles):
             if progress:
                 progress(i, len(tiles), f"tile {t.short()}")
-            ks = lower_gemm(hw, "k", M, N, K, batch=batch, a_dtype=a, b_dtype=b,
+            ks = lower_gemm(cur_gpu_config, "k", M, N, K, batch=batch, a_dtype=a, b_dtype=b,
                             compute_dtype=comp, tile=t, names=names)
             if not ks:
                 continue
-            out.append(_cand(ks, hw, ks[0].meta.get("tile", t.short()), flops, bytes_min, comp))
+            out.append(_cand(ks, cur_gpu_config, ks[0].meta.get("tile", t.short()), flops, bytes_min, comp))
 
     elif kind in ("attn_decode", "attn_prefill"):
         B, H, kvh = gi("B", 1), gi("H", 1), gi("kv_heads", 1)
@@ -229,24 +229,24 @@ def _kernel_candidates(hw: HardwareSpec, k: dict, progress=None):
             if progress:
                 progress(i, len(tiles), f"tile {t.short()}")
             if kind == "attn_decode":
-                ks = lower_attention_decode(hw, "k", v_in_k=bool(k.get("v_in_k", True)), tile=t, **kw)
+                ks = lower_attention_decode(cur_gpu_config, "k", v_in_k=bool(k.get("v_in_k", True)), tile=t, **kw)
                 flops = 2.0 * B * H * S * (dq + dv)
                 bytes_min = B * max(1, kvh) * S * (dq + (0 if k.get("v_in_k", True) else dv)) * kvb
             else:
-                ks = lower_attention_prefill(hw, "k", causal=bool(k.get("causal", True)), tile=t, **kw)
+                ks = lower_attention_prefill(cur_gpu_config, "k", causal=bool(k.get("causal", True)), tile=t, **kw)
                 frac = 0.5 if k.get("causal", True) else 1.0
                 flops = 2.0 * B * H * S * S * frac * (dq + dv)
                 bytes_min = B * max(1, kvh) * S * (dq + dv) * kvb
             if not ks:
                 continue
-            out.append(_cand(ks, hw, ks[0].meta.get("tile", t.short()), flops, bytes_min,
+            out.append(_cand(ks, cur_gpu_config, ks[0].meta.get("tile", t.short()), flops, bytes_min,
                              kw["compute_dtype"]))
 
     elif kind == "elementwise":
         bi, bo = float(k.get("bytes_in", 0)), float(k.get("bytes_out", 0))
-        ks = lower_elementwise(hw, "k", bytes_in=bi, bytes_out=bo,
+        ks = lower_elementwise(cur_gpu_config, "k", bytes_in=bi, bytes_out=bo,
                                flops=float(k.get("flops", 0)), sfu_ops=float(k.get("sfu_ops", 0)))
-        out.append(_cand(ks, hw, "-", float(k.get("flops", 0)), bi + bo, "bf16"))
+        out.append(_cand(ks, cur_gpu_config, "-", float(k.get("flops", 0)), bi + bo, "bf16"))
     else:
         raise ValueError(f"unknown kernel {kind}")
 
@@ -259,16 +259,16 @@ def _kernel_candidates(hw: HardwareSpec, k: dict, progress=None):
     return uniq
 
 
-def _cand(ks, hw, tile, flops, bytes_min, comp="bf16"):
-    res = [backend.evaluate(x, hw) for x in ks]
+def _cand(ks, cur_gpu_config, tile, flops, bytes_min, comp="bf16"):
+    res = [backend.evaluate(x, cur_gpu_config) for x in ks]
     t = sum(r.time_s for r in res)
     m = ks[0].meta
     det: dict[str, float] = {}
     for r in res:
         for n, v in r.limiter_detail.items():
             det[n] = det.get(n, 0.0) + v
-    ddr_peak = hw.get("memory.ddr.bandwidth_TBps") * 1e12
-    tc_table = hw.get("compute.tc_dense_tflops")
+    ddr_peak = cur_gpu_config.get("memory.ddr.bandwidth_TBps") * 1e12
+    tc_table = cur_gpu_config.get("compute.tc_dense_tflops")
     tc_peak = tc_table.get(comp, tc_table.get("bf16")) * 1e12
     return {"_ks": ks, "tile": tile, "time_us": t * 1e6,
             "tflops": flops / t / 1e12 if t else 0.0,
@@ -310,7 +310,6 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
         cur_gpu_config = _load_hw(cfg)
         cur_model_config = CurModelConfig(spec=_load_model(cfg), run=_run_config(cfg))
         model, rc = cur_model_config.spec, cur_model_config.run
-        hw = cur_gpu_config  # alias: report/timeline helpers below take `hw` by convention
         if mode == "run":
             rep = run(cur_gpu_config, cur_model_config, progress=prog)
             out = _model_json(rep)
@@ -332,7 +331,7 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
             problems = validate_workload(wl)
             if problems:
                 raise ValueError("; ".join(problems))
-            rep = run_workload(wl, hw, progress=prog)
+            rep = run_workload(wl, cur_gpu_config, progress=prog)
             out = _model_json(rep)
             out["workload"] = wl
             out["workload_memory"] = memory_breakdown(wl)
@@ -340,31 +339,31 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
             out["activity_by_block"] = rep.activity_by_domain()
             if cfg.get("compare_attention"):
                 prog(1, 1, "comparing flash vs naive attention")
-                out["attn_compare"] = compare_attention_impl(wl, hw)
+                out["attn_compare"] = compare_attention_impl(wl, cur_gpu_config)
             if cfg.get("slice_cfg"):
                 out["derived"] = slice_derive(cfg["slice_cfg"])
-            out["arch_svg"] = arch_svg(hw)
-            out["hw_name"] = hw.name
+            out["arch_svg"] = arch_svg(cur_gpu_config)
+            out["hw_name"] = cur_gpu_config.name
             # attach the heaviest kernel's timeline so the Excel / CSV / PDF downloads work
             prog(1, 1, "building the trace of the heaviest kernel")
-            ks = _top_kernels(rep, hw, n=1)
+            ks = _top_kernels(rep, cur_gpu_config, n=1)
             if ks:
-                tl = steady_timeline(ks[0], hw)
+                tl = steady_timeline(ks[0], cur_gpu_config)
                 out["timeline"] = tl
-                out["trace_text"] = trace_text(tl, ks[0].name, hw.name)
+                out["trace_text"] = trace_text(tl, ks[0].name, cur_gpu_config.name)
                 out["trace_kernel"] = ks[0].name
         elif mode == "kernel":
-            cands = _kernel_candidates(hw, cfg.get("kernel") or {}, progress=prog)
+            cands = _kernel_candidates(cur_gpu_config, cfg.get("kernel") or {}, progress=prog)
             if not cands:
                 raise ValueError("no legal tile for this shape (try smaller tiles / fewer stages)")
-            tl = steady_timeline(cands[0]["_ks"][0], hw)      # Figure 3(e) view of the best tile
+            tl = steady_timeline(cands[0]["_ks"][0], cur_gpu_config)      # Figure 3(e) view of the best tile
             k = cfg.get("kernel") or {}
             trace = trace_text(tl, f"{k.get('kernel', 'gemm')} {json.dumps({x: y for x, y in k.items() if x != 'tile'})}"
-                               f" tile={cands[0]['tile']}", hw.name,
+                               f" tile={cands[0]['tile']}", cur_gpu_config.name,
                                {"time_us": f"{cands[0]['time_us']:.3f}", "tflops": f"{cands[0]['tflops']:.0f}",
                                 "bound": cands[0]["bound"], "occupancy": cands[0]["occupancy"]})
             cands = [{k2: v for k2, v in c.items() if k2 != "_ks"} for c in cands]
-            out = {"hw": hw.name, "sms": hw.sms, "backend": backend.BACKEND, "timeline": tl,
+            out = {"hw": cur_gpu_config.name, "sms": cur_gpu_config.sms, "backend": backend.BACKEND, "timeline": tl,
                    "machine": machine_timeline(tl), "trace_text": trace,
                    "best": cands[0], "candidates": cands[:25], "tried": len(cands)}
         elif mode == "sweep":
@@ -372,13 +371,13 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
             values = [float(v) for v in str(cfg["sweep"]["values"]).replace(" ", "").split(",") if v]
             linked = None
             if cfg["sweep"].get("link_l2"):
-                ratio = hw.get("memory.l2.bandwidth_TBps") / hw.get("memory.ddr.bandwidth_TBps")
+                ratio = cur_gpu_config.get("memory.l2.bandwidth_TBps") / cur_gpu_config.get("memory.ddr.bandwidth_TBps")
                 linked = (lambda v: {"memory.l2.bandwidth_TBps": v * ratio}) if "ddr" in param else None
-            rows = sweep(model, hw, rc, param, values, linked=linked, progress=prog)
+            rows = sweep(model, cur_gpu_config, rc, param, values, linked=linked, progress=prog)
             out = {"param": param, "rows": rows}
         elif mode == "need":
             s = cfg["sweep"]
-            v = required_value(model, hw, rc, s["param"], float(s["target_ms"]),
+            v = required_value(model, cur_gpu_config, rc, s["param"], float(s["target_ms"]),
                                float(s.get("lo", 1)), float(s.get("hi", 64)))
             out = {"param": s["param"], "target_ms": float(s["target_ms"]), "value": v}
         else:
@@ -482,10 +481,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/arch.svg":
             q = dict(p.split("=", 1) for p in self.path.split("?", 1)[-1].split("&") if "=" in p)
             try:
-                hw = HardwareSpec.load(q.get("hw", "b300"))
+                cur_gpu_config = HardwareSpec.load(q.get("hw", "b300"))
             except Exception as e:                      # noqa: BLE001
                 return self._json(400, {"error": str(e)})
-            return self._send(200, arch_svg(hw).encode(), "image/svg+xml")
+            return self._send(200, arch_svg(cur_gpu_config).encode(), "image/svg+xml")
         if path == "/api/pdf":
             import tempfile
             from .report.pdfreport import write_pdf
@@ -495,18 +494,18 @@ class Handler(BaseHTTPRequestHandler):
             res = (job or {}).get("result") or {}
             cfg = (job or {}).get("config") or {}
             try:
-                hw = _load_hw(cfg)
+                cur_gpu_config = _load_hw(cfg)
                 wl = cfg.get("workload") or {}
-                rep = run_workload(wl, hw) if wl else None
+                rep = run_workload(wl, cur_gpu_config) if wl else None
                 kernels = []
                 if rep is not None:
                     for o in sorted(rep.ops, key=lambda o: -o.total_s)[:3]:
                         kernels += [k for k in _KERNELS.get(id(o), [])] or []
                 from .model.runner import resolve_op  # noqa: F401
                 if rep is not None and not kernels:
-                    kernels = _top_kernels(rep, hw)
+                    kernels = _top_kernels(rep, cur_gpu_config)
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-                    write_pdf(f.name, hw, kernels, res.get("title", "TileSight report"), wl, rep)
+                    write_pdf(f.name, cur_gpu_config, kernels, res.get("title", "TileSight report"), wl, rep)
                     body = open(f.name, "rb").read()
             except Exception as e:                      # noqa: BLE001
                 return self._json(400, {"error": f"{type(e).__name__}: {e}"})

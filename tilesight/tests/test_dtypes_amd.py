@@ -13,8 +13,8 @@ AMD = ["mi300x", "mi325x", "mi355x", "mi450"]
 
 @pytest.mark.parametrize("name", NV + AMD)
 def test_preset_loads_and_runs_a_gemm(name):
-    hw = HardwareSpec.load(name)
-    c = _kernel_candidates(hw, dict(kernel="gemm", M=4096, N=4096, K=7168,
+    cur_gpu_config = HardwareSpec.load(name)
+    c = _kernel_candidates(cur_gpu_config, dict(kernel="gemm", M=4096, N=4096, K=7168,
                                     a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8"))[0]
     assert c["time_us"] >= c["ideal_us"] > 0
     assert 0 < c["peak_pct"] <= 1.0
@@ -22,33 +22,33 @@ def test_preset_loads_and_runs_a_gemm(name):
 
 @pytest.mark.parametrize("dt", ["int4", "nvfp4", "fp4", "fp8", "int8", "bf16", "fp16", "fp32"])
 def test_every_dtype_is_usable(dt):
-    hw = HardwareSpec.load("b300")
-    ks = lower_gemm(hw, "g", 1024, 1024, 1024, a_dtype="bf16" if dt == "int4" else dt,
+    cur_gpu_config = HardwareSpec.load("b300")
+    ks = lower_gemm(cur_gpu_config, "g", 1024, 1024, 1024, a_dtype="bf16" if dt == "int4" else dt,
                     b_dtype=dt, compute_dtype="bf16" if dt == "int4" else dt,
                     tile=TileConfig(bm=64, bn=64, bk=64))
     assert ks and DTYPE_BYTES[dt] > 0
 
 
 def test_dtype_ordering_on_blackwell():
-    hw = HardwareSpec.load("b300")
+    cur_gpu_config = HardwareSpec.load("b300")
     t = {}
     for dt in ("nvfp4", "fp8", "bf16", "fp32"):
-        t[dt] = _kernel_candidates(hw, dict(kernel="gemm", M=4096, N=4096, K=7168,
+        t[dt] = _kernel_candidates(cur_gpu_config, dict(kernel="gemm", M=4096, N=4096, K=7168,
                                             a_dtype=dt, b_dtype=dt, compute_dtype=dt))[0]["time_us"]
     assert t["nvfp4"] < t["fp8"] < t["bf16"] < t["fp32"]
 
 
 def test_fp32_uses_cuda_cores_not_tensor_cores():
-    hw = HardwareSpec.load("b300")
-    lane, _ = hw.mma_cost(1e12, "fp32")
+    cur_gpu_config = HardwareSpec.load("b300")
+    lane, _ = cur_gpu_config.mma_cost(1e12, "fp32")
     assert lane == "cuda"
-    assert hw.mma_cost(1e12, "fp8")[0] == "tc"
+    assert cur_gpu_config.mma_cost(1e12, "fp8")[0] == "tc"
 
 
 def test_nvfp4_aliases_to_the_fp4_datapath():
-    hw = HardwareSpec.load("b300")
-    assert hw.tc_datapath("nvfp4") == "fp4" and hw.tc_datapath("mxfp4") == "fp4"
-    assert abs(hw.tc_time_per_sm(1e12, "nvfp4") - hw.tc_time_per_sm(1e12, "fp4")) < 1e-18
+    cur_gpu_config = HardwareSpec.load("b300")
+    assert cur_gpu_config.tc_datapath("nvfp4") == "fp4" and cur_gpu_config.tc_datapath("mxfp4") == "fp4"
+    assert abs(cur_gpu_config.tc_time_per_sm(1e12, "nvfp4") - cur_gpu_config.tc_time_per_sm(1e12, "fp4")) < 1e-18
 
 
 def test_missing_datapath_widens():
@@ -59,28 +59,28 @@ def test_missing_datapath_widens():
 
 
 def test_int4_is_weight_only_and_halves_traffic():
-    hw = HardwareSpec.load("b300")
+    cur_gpu_config = HardwareSpec.load("b300")
     tile = TileConfig(bm=64, bn=128, bk=128)
-    a = lower_gemm(hw, "g", 8, 7168, 7168, a_dtype="bf16", b_dtype="int4",
+    a = lower_gemm(cur_gpu_config, "g", 8, 7168, 7168, a_dtype="bf16", b_dtype="int4",
                    compute_dtype="bf16", tile=tile)[0]
-    b = lower_gemm(hw, "g", 8, 7168, 7168, a_dtype="bf16", b_dtype="fp8",
+    b = lower_gemm(cur_gpu_config, "g", 8, 7168, 7168, a_dtype="bf16", b_dtype="fp8",
                    compute_dtype="bf16", tile=tile)[0]
     assert a.meta["weight_bytes"] == b.meta["weight_bytes"] / 2
 
 
 def test_amd_has_no_clusters_or_tmem():
     for name in AMD:
-        hw = HardwareSpec.load(name)
-        assert not hw.get("compute.cluster_multicast", False)
-        assert not hw.has_tmem                       # accumulators live in AGPRs
-        assert hw.resolve_path("tma") in (hw.get("load_paths") or {})   # falls back to a real path
-        ks = lower_gemm(hw, "g", 4096, 4096, 4096, tile=TileConfig(bm=128, bn=128, bk=64, cluster_m=2))
+        cur_gpu_config = HardwareSpec.load(name)
+        assert not cur_gpu_config.get("compute.cluster_multicast", False)
+        assert not cur_gpu_config.has_tmem                       # accumulators live in AGPRs
+        assert cur_gpu_config.resolve_path("tma") in (cur_gpu_config.get("load_paths") or {})   # falls back to a real path
+        ks = lower_gemm(cur_gpu_config, "g", 4096, 4096, 4096, tile=TileConfig(bm=128, bn=128, bk=64, cluster_m=2))
         assert ks is None
 
 
 def test_amd_model_run_and_kv():
-    hw = HardwareSpec.load("mi355x")
-    rep = run_model(ModelSpec.load("llama3_70b.hf"), hw,
+    cur_gpu_config = HardwareSpec.load("mi355x")
+    rep = run_model(ModelSpec.load("llama3_70b.hf"), cur_gpu_config,
                     RunConfig(phase="decode", batch=64, seq_len=4096, tp=8, dp=1))
     assert rep.step_time_s > 0 and rep.memory.weights_GB > 0
     assert "tmem" not in rep.limiter_breakdown()

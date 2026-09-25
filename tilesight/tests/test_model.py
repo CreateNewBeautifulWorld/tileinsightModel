@@ -33,8 +33,8 @@ def test_decode_report_runs_and_is_ddr_dominated():
 
 def test_tile_override_is_used():
     rc = RunConfig(phase="decode", batch=64, seq_len=2048, dp=8)
-    hw = HardwareSpec.load("b300").override(
+    cur_gpu_config = HardwareSpec.load("b300").override(
         {"compute.tile_policy.overrides": {"*.experts_gate_up": {"bm": 64, "bn": 128, "bk": 128}}})
-    rep = run_model(ModelSpec.load("kimi_k2.hf"), hw, rc)
+    rep = run_model(ModelSpec.load("kimi_k2.hf"), cur_gpu_config, rc)
     tiles = {o.op.name: o.tile for o in rep.ops}
     assert tiles["moe.3.moe.experts_gate_up"].startswith("64x128x128")

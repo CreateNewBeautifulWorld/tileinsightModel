@@ -105,7 +105,7 @@ def unit_groups(lanes: list[str]) -> dict[str, list[str]]:
     return g
 
 
-def write_pdf(path: str, hw, kernels, title: str, workload_cfg: dict | None = None,
+def write_pdf(path: str, cur_gpu_config, kernels, title: str, workload_cfg: dict | None = None,
               report=None) -> str:
     styles = getSampleStyleSheet()
     h1 = ParagraphStyle("h1", parent=styles["Title"], fontName=FONT, fontSize=15, spaceAfter=4)
@@ -117,7 +117,7 @@ def write_pdf(path: str, hw, kernels, title: str, workload_cfg: dict | None = No
                             topMargin=12 * mm, bottomMargin=12 * mm, title=title)
     W = doc.width
     story = [Paragraph(title, h1),
-             Paragraph(f"{hw.name} · {hw.sms} SMs · {hw.clock_hz / 1e9:.2f} GHz · analytical model, "
+             Paragraph(f"{cur_gpu_config.name} · {cur_gpu_config.sms} SMs · {cur_gpu_config.clock_hz / 1e9:.2f} GHz · analytical model, "
                        f"nothing was executed on a GPU", body)]
 
     if report is not None:
@@ -147,8 +147,8 @@ def write_pdf(path: str, hw, kernels, title: str, workload_cfg: dict | None = No
         story += [Paragraph("workload config", h2), _tbl([["field", "value"]] + flat, [70 * mm, 60 * mm])]
 
     for k in kernels[:3]:
-        tl = steady_timeline(k, hw)
-        res = backend.evaluate(k, hw)
+        tl = steady_timeline(k, cur_gpu_config)
+        res = backend.evaluate(k, cur_gpu_config)
         story += [PageBreak(), Paragraph(f"kernel: {k.name}", h2),
                   _tbl([["latency", f"{res.time_s * 1e6:.2f} us / {res.time_s * tl['clock_hz']:.0f} cycles"],
                         ["tile", str(k.meta.get("tile", "-"))],

@@ -6,10 +6,10 @@ from ..ir.kernel import Kernel, KernelResult
 _LANE_CACHE: dict = {}
 
 
-def _lanes(core, hw):
-    key = hw.fingerprint
+def _lanes(core, cur_gpu_config):
+    key = cur_gpu_config.fingerprint
     if key not in _LANE_CACHE:
-        py = hw.lanes()
+        py = cur_gpu_config.lanes()
         cl = []
         for l in py:
             c = core.Lane()
@@ -52,14 +52,14 @@ def unpack(r, k: Kernel) -> KernelResult:
                         dict(r.limiter_time), int(r.waves), k.meta, det)
 
 
-def evaluate_cpp(core, k: Kernel, hw) -> KernelResult:
-    names, lanes = _lanes(core, hw)
-    q = (float(hw.get("memory.queueing.coef") or 0.0), float(hw.get("memory.queueing.max_factor") or 3.0))
-    return unpack(core.evaluate(pack(core, k, names, q), lanes, hw.sms, hw.launch_s), k)
+def evaluate_cpp(core, k: Kernel, cur_gpu_config) -> KernelResult:
+    names, lanes = _lanes(core, cur_gpu_config)
+    q = (float(cur_gpu_config.get("memory.queueing.coef") or 0.0), float(cur_gpu_config.get("memory.queueing.max_factor") or 3.0))
+    return unpack(core.evaluate(pack(core, k, names, q), lanes, cur_gpu_config.sms, cur_gpu_config.launch_s), k)
 
 
-def evaluate_batch_cpp(core, ks: list[Kernel], hw, threads: int = 8) -> list[KernelResult]:
-    names, lanes = _lanes(core, hw)
-    q = (float(hw.get("memory.queueing.coef") or 0.0), float(hw.get("memory.queueing.max_factor") or 3.0))
-    res = core.evaluate_batch([pack(core, k, names, q) for k in ks], lanes, hw.sms, hw.launch_s, threads)
+def evaluate_batch_cpp(core, ks: list[Kernel], cur_gpu_config, threads: int = 8) -> list[KernelResult]:
+    names, lanes = _lanes(core, cur_gpu_config)
+    q = (float(cur_gpu_config.get("memory.queueing.coef") or 0.0), float(cur_gpu_config.get("memory.queueing.max_factor") or 3.0))
+    res = core.evaluate_batch([pack(core, k, names, q) for k in ks], lanes, cur_gpu_config.sms, cur_gpu_config.launch_s, threads)
     return [unpack(r, k) for r, k in zip(res, ks)]

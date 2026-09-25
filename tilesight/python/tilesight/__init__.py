@@ -12,8 +12,8 @@ Quick start:
                                       run=RunConfig(phase="decode", batch=256, seq_len=8192, tp=1, dp=8))
     rep = run(cur_gpu_config, cur_model_config)
 
-`run_model(model, hw, rc)` is the lower-level, three-argument engine entry point that `run()`
-wraps; existing code and internal callers keep using it directly.
+`run_model(model, cur_gpu_config, rc)` is the lower-level, three-argument engine entry point
+that `run()` wraps; existing code and internal callers keep using it directly.
 """
 from .hw.spec import HardwareSpec
 from .model.run_config import RunConfig

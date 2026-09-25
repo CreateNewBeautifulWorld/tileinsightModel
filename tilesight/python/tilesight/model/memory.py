@@ -52,7 +52,7 @@ def kv_bytes_per_token(m: ModelSpec, rc: RunConfig) -> float:
     return kv_bytes_per_seq_all(m, rc, 1)
 
 
-def memory_report(m: ModelSpec, rc: RunConfig, groups, hw: HardwareSpec) -> MemoryReport:
+def memory_report(m: ModelSpec, rc: RunConfig, groups, cur_gpu_config: HardwareSpec) -> MemoryReport:
     detail: dict[str, float] = {}
     act_peak = 0.0
     ab = DTYPE_BYTES[rc.act_dtype]
@@ -72,6 +72,6 @@ def memory_report(m: ModelSpec, rc: RunConfig, groups, hw: HardwareSpec) -> Memo
     kvt = kv_bytes_per_token(m, rc)
     kv = kv_bytes_per_seq_all(m, rc, rc.seq_len) * rc.seqs_per_rank / GB
     acts = 2 * act_peak / GB            # double-buffered live activations
-    return MemoryReport(weights, kv, acts, RUNTIME_RESERVE_GB, hw.ddr_capacity_bytes / GB, kvt,
+    return MemoryReport(weights, kv, acts, RUNTIME_RESERVE_GB, cur_gpu_config.ddr_capacity_bytes / GB, kvt,
                         dict(sorted(detail.items(), key=lambda kv: -kv[1])),
                         lambda s: kv_bytes_per_seq_all(m, rc, s))

@@ -28,20 +28,20 @@ class TileStream:
     n_streams: int
 
 
-def simulate_l2(hw: HardwareSpec, s: TileStream) -> SimResult:
+def simulate_l2(cur_gpu_config: HardwareSpec, s: TileStream) -> SimResult:
     """Run the stream through the memory slices' L2s (one partition per slice)."""
     from ..report.addressing import AddressMap
-    lmap = AddressMap.from_hw(hw, "l2")
-    parts = int(hw.get("memory.l2.partitions") or 1)
+    lmap = AddressMap.from_hw(cur_gpu_config, "l2")
+    parts = int(cur_gpu_config.get("memory.l2.partitions") or 1)
     return _simulate(s.keys, s.addrs, s.sizes, s.streams, s.n_streams,
-                     hw.l2_capacity_bytes, parts, lmap.port_of,
-                     str(hw.get("memory.l2.policy")))
+                     cur_gpu_config.l2_capacity_bytes, parts, lmap.port_of,
+                     str(cur_gpu_config.get("memory.l2.policy")))
 
 
-def buffer_residency(hw: HardwareSpec, footprint_bytes: float, klass: str) -> float:
+def buffer_residency(cur_gpu_config: HardwareSpec, footprint_bytes: float, klass: str) -> float:
     """Share of a tensor class that is pre-allocated on the on-chip buffer (deterministic)."""
     from ..kernels.gemm import resident_frac
-    return resident_frac(hw, footprint_bytes, klass)
+    return resident_frac(cur_gpu_config, footprint_bytes, klass)
 
 
 def level_split(bytes_total: float, l2_miss: float, buffer_miss: float | None) -> dict[str, float]:

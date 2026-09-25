@@ -40,7 +40,7 @@ class DecodePoint:
 @dataclass
 class RequestReport:
     model: str
-    hw: str
+    gpu_name: str
     rc: RunConfig
     prefill: ModelReport
     points: list[DecodePoint]
@@ -61,7 +61,7 @@ def _pages(tokens: int, page: int) -> int:
     return math.ceil(tokens / page) * page if page > 0 else tokens
 
 
-def run_request(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, progress=None) -> RequestReport:
+def run_request(model: ModelSpec, cur_gpu_config: HardwareSpec, rc: RunConfig, progress=None) -> RequestReport:
     P = rc.prompt_len or rc.seq_len
     O = max(1, rc.output_len)
     nseq = rc.seqs_per_rank
@@ -69,7 +69,7 @@ def run_request(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, progress=None
     pb = rc.prefill_batch or rc.batch
     if progress:
         progress(0, 1 + max(2, rc.decode_samples), "prefill")
-    pre = run_model(model, hw, replace(rc, phase="prefill", seq_len=P, batch=pb))
+    pre = run_model(model, cur_gpu_config, replace(rc, phase="prefill", seq_len=P, batch=pb))
     ttft = pre.step_time_s
     # ---- decode samples along the generation --------------------------------------------
     n = max(2, rc.decode_samples)
@@ -80,7 +80,7 @@ def run_request(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, progress=None
         L = P + t
         if progress:
             progress(1 + i, 1 + len(steps), f"decode step {t} (kv {L})")
-        rep = run_model(model, hw, replace(rc, phase="decode", seq_len=L))
+        rep = run_model(model, cur_gpu_config, replace(rc, phase="decode", seq_len=L))
         base = base or rep
         kv_now = kv_bytes_per_seq_all(model, rc, _pages(L, rc.page_size)) * nseq / GB
         m = rep.memory
@@ -104,7 +104,7 @@ def run_request(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, progress=None
     per_req = kv_req_peak if rc.kv_reserve == "peak" else \
         kv_bytes_per_seq_all(model, rc, _pages(P + O // 2, rc.page_size))
     max_req = max(0, math.floor(room / per_req)) if per_req > 0 else 10 ** 9
-    return RequestReport(model.name, hw.name, rc, pre, pts, ttft, tpot_avg, ttft + tpot_avg * O,
+    return RequestReport(model.name, cur_gpu_config.name, rc, pre, pts, ttft, tpot_avg, ttft + tpot_avg * O,
                          peak_total, peak_kv, m.capacity_GB, max_req)
 
 
@@ -112,7 +112,7 @@ def request_summary(r: RequestReport) -> str:
     from ..report.table import bound_report
     rc = r.rc
     P, O = rc.prompt_len or rc.seq_len, rc.output_len
-    L = [f"== {r.model} on {r.hw}  request: prompt={P} output={O}  batch={rc.batch} "
+    L = [f"== {r.model} on {r.gpu_name}  request: prompt={P} output={O}  batch={rc.batch} "
          f"(seqs/rank {rc.seqs_per_rank}) tp={rc.tp} dp={rc.dp} ep={rc.ep_size} page={rc.page_size}"]
     L.append(f"TTFT (prefill {rc.prefill_batch or rc.batch} seq x {P})  : {r.ttft_s * 1e3:9.2f} ms")
     L.append(f"TPOT first / last / avg          : {r.points[0].tpot_s * 1e3:.2f} / "

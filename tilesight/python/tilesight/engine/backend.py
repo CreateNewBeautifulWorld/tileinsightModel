@@ -20,11 +20,11 @@ if os.environ.get("TILESIGHT_BACKEND", "auto") != "python":
 BACKEND = "cpp" if _core is not None else "python"
 
 
-def evaluate(kernel, hw):
+def evaluate(kernel, cur_gpu_config):
     if _core is not None:
         from .cpp_bridge import evaluate_cpp
-        return evaluate_cpp(_core, kernel, hw)
-    return _pyref.evaluate(kernel, hw)
+        return evaluate_cpp(_core, kernel, cur_gpu_config)
+    return _pyref.evaluate(kernel, cur_gpu_config)
 
 
 def expected_misses(keys, streams, n_streams, assoc, cap_tiles):

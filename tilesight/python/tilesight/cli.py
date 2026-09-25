@@ -38,16 +38,16 @@ def _rc(a) -> RunConfig:
     return RunConfig(**kw)
 
 
-def _hw(a) -> HardwareSpec:
-    hw = HardwareSpec.load(a.hw)
+def _cur_gpu_config(a) -> HardwareSpec:
+    cur_gpu_config = HardwareSpec.load(a.cur_gpu_config)
     if getattr(a, "ideal", False):
-        hw = hw.lossless()
+        cur_gpu_config = cur_gpu_config.lossless()
     for s in a.set or []:
         k, v = s.split("=")
-        hw = hw.override({k: yaml.safe_load(v)})
+        cur_gpu_config = cur_gpu_config.override({k: yaml.safe_load(v)})
     if getattr(a, "tile", None):
-        hw = hw.override({"compute.tile_policy.gemm": a.tile})
-    return hw
+        cur_gpu_config = cur_gpu_config.override({"compute.tile_policy.gemm": a.tile})
+    return cur_gpu_config
 
 
 def main(argv=None):
@@ -55,7 +55,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     bp = sub.add_parser("buffer", help="size and configure an extra on-chip shared buffer")
     bp.add_argument("--model", required=True)
-    bp.add_argument("--hw", default="b300")
+    bp.add_argument("--hw", dest="cur_gpu_config", default="b300")
     bp.add_argument("--run-config", dest="run_config")
     bp.add_argument("--phase", default="decode")
     bp.add_argument("--batch", type=int, default=256)
@@ -69,7 +69,7 @@ def main(argv=None):
     bp.add_argument("--csv")
 
     kp = sub.add_parser("kernel", help="single-GPU kernel study (tile ranking + Figure-3e timeline)")
-    kp.add_argument("--hw", default="b300")
+    kp.add_argument("--hw", dest="cur_gpu_config", default="b300")
     kp.add_argument("--kernel", default="gemm",
                     choices=["gemm", "grouped_gemm", "attn_decode", "attn_prefill", "elementwise"])
     kp.add_argument("--shape", required=True, help='JSON, e.g. \'{"M":4096,"N":4096,"K":7168}\'')
@@ -109,7 +109,7 @@ def main(argv=None):
     cp2.add_argument("--workload", action="store_true", help="list the workload fields instead")
 
     ap2 = sub.add_parser("addrmap", help="dump the address -> L2 slice / HBM port mapping")
-    ap2.add_argument("--hw", default="b300")
+    ap2.add_argument("--hw", dest="cur_gpu_config", default="b300")
     ap2.add_argument("--set", action="append", help="override, e.g. memory.addressing.l2.mode=hash")
     ap2.add_argument("--rows", type=int, default=8)
     ap2.add_argument("--base", default="0x0")
@@ -119,7 +119,7 @@ def main(argv=None):
 
     mp = sub.add_parser("memmap", help="per-GPU memory map: base address of every tensor")
     mp.add_argument("--model", required=True)
-    mp.add_argument("--hw", default="b300")
+    mp.add_argument("--hw", dest="cur_gpu_config", default="b300")
     mp.add_argument("--phase", default="decode")
     mp.add_argument("--batch", type=int, default=256)
     mp.add_argument("--seq", type=int, default=8192)
@@ -136,7 +136,7 @@ def main(argv=None):
     for name in ("run", "request", "sweep", "need", "dump-model"):
         p = sub.add_parser(name)
         p.add_argument("--model", required=True)
-        p.add_argument("--hw", default="b300")
+        p.add_argument("--hw", dest="cur_gpu_config", default="b300")
         p.add_argument("--run-config")
         p.add_argument("--phase")
         p.add_argument("--batch", type=int)
@@ -228,9 +228,9 @@ def main(argv=None):
     if a.cmd == "config":
         from .hw.schema import FIELDS, SECTIONS, as_csv, as_markdown, _Required
         if a.validate:
-            hw = HardwareSpec.load(a.validate)
-            probs = hw.validate()
-            print(f"{hw.name}: {'ok' if not probs else str(len(probs)) + ' problem(s)'}")
+            cur_gpu_config = HardwareSpec.load(a.validate)
+            probs = cur_gpu_config.validate()
+            print(f"{cur_gpu_config.name}: {'ok' if not probs else str(len(probs)) + ' problem(s)'}")
             for p_ in probs:
                 print("  -", p_)
         if a.md:
@@ -272,24 +272,24 @@ def main(argv=None):
         return
     if a.cmd == "addrmap":
         from .report.addressing import AddressMap
-        hw = HardwareSpec.load(a.hw)
+        cur_gpu_config = HardwareSpec.load(a.cur_gpu_config)
         for s_ in a.set or []:
             k_, v_ = s_.split("=")
-            hw = hw.override({k_: yaml.safe_load(v_)})
+            cur_gpu_config = cur_gpu_config.override({k_: yaml.safe_load(v_)})
         sides = ["l2", "ddr"] if a.side == "both" else [a.side]
         for side in sides:
-            m = AddressMap.from_hw(hw, side)
+            m = AddressMap.from_hw(cur_gpu_config, side)
             print(m.dump(rows=a.rows, base=int(a.base, 0)))
             print()
         if a.decode:
-            maps = {s2: AddressMap.from_hw(hw, s2) for s2 in ("l2", "ddr")}
+            maps = {s2: AddressMap.from_hw(cur_gpu_config, s2) for s2 in ("l2", "ddr")}
             print(f"{'address':>16s} {'L2 slice':>9s} {'HBM port':>9s}")
             for tok in a.decode.split(","):
                 addr = int(tok, 0)
                 print(f"0x{addr:014x} {maps['l2'].port_of(addr):9d} {maps['ddr'].port_of(addr):9d}")
         if a.csv:
             with open(a.csv, "w") as f:
-                f.write(AddressMap.from_hw(hw, sides[0]).dump_csv(base=int(a.base, 0)))
+                f.write(AddressMap.from_hw(cur_gpu_config, sides[0]).dump_csv(base=int(a.base, 0)))
             print(f"written to {a.csv}")
         return
     if a.cmd == "memmap":
@@ -309,26 +309,26 @@ def main(argv=None):
         from .dse.buffer import best_alloc, capacity_curve, optimize_buffer, profile_classes, with_buffer
         from .dse.sweep import rows_to_csv
         model_ = ModelSpec.load(a.model)
-        hw_ = HardwareSpec.load(a.hw)
+        cur_gpu_config_ = HardwareSpec.load(a.cur_gpu_config)
         rc_ = RunConfig(phase=a.phase, batch=a.batch, seq_len=a.seq, tp=a.tp, dp=a.dp)
         kw = {"bandwidth_TBps": a.bw} if a.bw else {}
-        l2 = hw_.get("memory.l2.capacity_MB", 1)
+        l2 = cur_gpu_config_.get("memory.l2.capacity_MB", 1)
         if a.capacity:
             # closed form first: per class, saving per byte of capacity = HBM traffic / footprint
-            prof = profile_classes(model_, hw_, rc_)
+            prof = profile_classes(model_, cur_gpu_config_, rc_)
             print(f"baseline {prof['baseline_step_s'] * 1e3:.2f} ms · per class (HBM GB/step, "
                   f"footprint GB, value/byte):")
             for c in ("weight", "kv", "act"):
                 print(f"  {c:7s} {prof['traffic_bytes'][c] / 1e9:8.2f} GB "
                       f"{prof['footprint_bytes'][c] / 1e9:9.2f} GB {prof['value_per_byte'][c]:8.3f}")
             cf = best_alloc(prof, a.capacity)
-            cf_ms = run_model(model_, with_buffer(hw_, a.capacity, policy="pin", pin=cf["pin"], **kw),
+            cf_ms = run_model(model_, with_buffer(cur_gpu_config_, a.capacity, policy="pin", pin=cf["pin"], **kw),
                               rc_).step_time_s * 1e3
             print(f"closed form: fill {' > '.join(cf['order'])}, pin "
                   f"{{{', '.join(f'{k}:{v:.2f}' for k, v in cf['pin'].items())}}} -> {cf_ms:.2f} ms "
                   f"(minimises HBM bytes, not time)\n")
-            best, rows = optimize_buffer(model_, hw_, rc_, a.capacity, steps=a.steps, **kw)
-            print(f"{a.capacity:.0f} MB buffer ({a.capacity / l2:.1f}x L2) on {hw_.name}, "
+            best, rows = optimize_buffer(model_, cur_gpu_config_, rc_, a.capacity, steps=a.steps, **kw)
+            print(f"{a.capacity:.0f} MB buffer ({a.capacity / l2:.1f}x L2) on {cur_gpu_config_.name}, "
                   f"{len(rows)} configurations")
             print(f"{'policy':6s} {'w':>4s} {'kv':>4s} {'act':>4s} {'byp':>4s} {'pre':>4s} "
                   f"{'step_ms':>8s} {'x':>6s}  top bound")
@@ -339,8 +339,8 @@ def main(argv=None):
             out = rows_to_csv(rows)
         else:
             caps = [float(x) for x in a.capacities.split(",")]
-            rows = capacity_curve(model_, hw_, rc_, caps, bypass_l2=True, prefetch=True, **kw)
-            print(f"capacity curve on {hw_.name} (L2 = {l2} MB), bypass_l2 + prefetch on")
+            rows = capacity_curve(model_, cur_gpu_config_, rc_, caps, bypass_l2=True, prefetch=True, **kw)
+            print(f"capacity curve on {cur_gpu_config_.name} (L2 = {l2} MB), bypass_l2 + prefetch on")
             print(f"{'MB':>8s} {'xL2':>6s} {'step_ms':>8s} {'speedup':>8s}  top bound")
             for r in rows:
                 print(f"{r['capacity_MB']:8.0f} {r['x_L2']:6.2f} {r['step_ms']:8.2f} "
@@ -352,17 +352,17 @@ def main(argv=None):
     if a.cmd == "kernel":
         from .report.timeline import cycle_csv, machine_timeline, steady_timeline, timeline_text, trace_text
         from .server import _kernel_candidates
-        hw = HardwareSpec.load(a.hw)
+        cur_gpu_config = HardwareSpec.load(a.cur_gpu_config)
         if a.ideal:
-            hw = hw.lossless()
+            cur_gpu_config = cur_gpu_config.lossless()
         for s_ in a.set or []:
             k_, v_ = s_.split("=")
-            hw = hw.override({k_: yaml.safe_load(v_)})
+            cur_gpu_config = cur_gpu_config.override({k_: yaml.safe_load(v_)})
         spec = {"kernel": a.kernel, "tile": a.tile, "a_dtype": a.dtype, "b_dtype": a.dtype,
                 "compute_dtype": a.dtype, **json.loads(a.shape)}
-        cands = _kernel_candidates(hw, spec)
+        cands = _kernel_candidates(cur_gpu_config, spec)
         b = cands[0]
-        print(f"{hw.name} ({hw.sms} SMs) · {a.kernel} · {len(cands)} legal tiles")
+        print(f"{cur_gpu_config.name} ({cur_gpu_config.sms} SMs) · {a.kernel} · {len(cands)} legal tiles")
         print(f"best {b['tile']}  {b['time_us']:.2f} us  {b['tflops']:.0f} TFLOP/s "
               f"({100 * b['peak_pct']:.1f}% of {a.dtype} peak)  HBM {b['ddr_GBps']:.0f} GB/s  "
               f"occ {b['occupancy']}  bound {b['bound']}")
@@ -379,7 +379,7 @@ def main(argv=None):
             _sh = json.loads(a.shape)
             _t = _TC(**json.loads(a.tile)) if a.tile != "auto" else \
                 _TC(*[int(x) for x in b["tile"].split("/")[0].split("x")])
-            addr_fn = kernel_addr_fn(hw, _sh.get("M", 1), _sh.get("N", 1), _sh.get("K", 1), _t,
+            addr_fn = kernel_addr_fn(cur_gpu_config, _sh.get("M", 1), _sh.get("N", 1), _sh.get("K", 1), _t,
                                      _DT[a.dtype], _DT[a.dtype], base=int(a.base, 0),
                                      layout_a=a.layout_a, layout_b=a.layout_b)
         sim = b["_ks"][0].meta.get("l2_sim")
@@ -395,10 +395,10 @@ def main(argv=None):
         if l1m:
             print(f"  L1 ({b['_ks'][0].meta['l1_capacity_KB']:.0f} KB usable, private per SM/cluster): "
                   f"hit {', '.join(f'{100 * (1 - m):.0f}%' for m in l1m)} per stream")
-        tl = steady_timeline(b["_ks"][0], hw, addr_fn=addr_fn)
+        tl = steady_timeline(b["_ks"][0], cur_gpu_config, addr_fn=addr_fn)
         print(timeline_text(tl, unit=a.unit))
         if a.trace_out:
-            txt = trace_text(tl, f"{a.kernel} {a.shape} {a.dtype} tile={b['tile']}", hw.name,
+            txt = trace_text(tl, f"{a.kernel} {a.shape} {a.dtype} tile={b['tile']}", cur_gpu_config.name,
                              {"time_us": f"{b['time_us']:.3f}", "tflops": f"{b['tflops']:.0f}",
                               "bound": b["bound"], "occupancy": b["occupancy"]})
             with open(a.trace_out, "w") as f:
@@ -411,7 +411,7 @@ def main(argv=None):
             sh = json.loads(a.shape)
             tcfg = TileConfig(**json.loads(a.tile)) if a.tile != "auto" else \
                 TileConfig(*[int(x) for x in b["tile"].split("/")[0].split("x")])
-            rep = analyze_gemm(hw, sh.get("M", 1), sh.get("N", 1), sh.get("K", 1), tcfg,
+            rep = analyze_gemm(cur_gpu_config, sh.get("M", 1), sh.get("N", 1), sh.get("K", 1), tcfg,
                                DTYPE_BYTES[a.dtype], DTYPE_BYTES[a.dtype],
                                layout_a=a.layout_a, layout_b=a.layout_b,
                                resident=int(b["occupancy"].split("/")[0]))
@@ -425,16 +425,16 @@ def main(argv=None):
             title = f"{a.kernel} {a.shape} {a.dtype} · tile {b['tile']}"
             if a.fig3:
                 with open(a.fig3, "w") as f:
-                    f.write(figure3_html(b["_ks"][0], hw, title, addr_fn=addr_fn))
+                    f.write(figure3_html(b["_ks"][0], cur_gpu_config, title, addr_fn=addr_fn))
                 print(f"Figure 3(d)(e)(f) written to {a.fig3}")
             if a.fig3_json:
                 with open(a.fig3_json, "w") as f:
-                    f.write(figure3_json(b["_ks"][0], hw))
+                    f.write(figure3_json(b["_ks"][0], cur_gpu_config))
                 print(f"Figure 3 data written to {a.fig3_json}")
         if a.xlsx_out:
             from .report.excel import write_excel
             info = write_excel(tl, a.xlsx_out, f"{a.kernel} {a.shape} {a.dtype} tile={b['tile']}",
-                               hw.name, full=a.csv_full,
+                               cur_gpu_config.name, full=a.csv_full,
                                extra={"time_us": f"{b['time_us']:.3f}", "bound": b["bound"],
                                       "occupancy": b["occupancy"], "tflops": f"{b['tflops']:.0f}"})
             print(f"Excel written to {a.xlsx_out} ({info['rows']} cycles"
@@ -453,7 +453,7 @@ def main(argv=None):
     # The two configs the model actually takes: cur_gpu_config (what the part is, incl. how it
     # tiles) and cur_model_config (what runs on it). --model/--hw/--run-config/--set/--tile just
     # pick how they're built here at the CLI boundary.
-    cur_gpu_config = _hw(a)
+    cur_gpu_config = _cur_gpu_config(a)
     cur_model_config = CurModelConfig(spec=model, run=_rc(a))
     if a.cmd == "request":
         from .model.request import request_summary, run_request

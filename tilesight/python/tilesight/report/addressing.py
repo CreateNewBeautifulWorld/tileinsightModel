@@ -76,14 +76,14 @@ class AddressMap:
     addr_bits: int
 
     @classmethod
-    def from_hw(cls, hw, side: str) -> "AddressMap":
-        cfg = (hw.get(f"memory.addressing.{side}") or {})
-        defaults = {"l2": (int(hw.get("memory.l2.slices", max(1, int(hw.get("dies", 1)) * 8)) or 1)),
-                    "ddr": int(hw.get("memory.ddr.ports") or 1)}
-        gran_kb = float(cfg.get("granularity_KB", hw.get("memory.interleave_KB")))
+    def from_hw(cls, cur_gpu_config, side: str) -> "AddressMap":
+        cfg = (cur_gpu_config.get(f"memory.addressing.{side}") or {})
+        defaults = {"l2": (int(cur_gpu_config.get("memory.l2.slices", max(1, int(cur_gpu_config.get("dies", 1)) * 8)) or 1)),
+                    "ddr": int(cur_gpu_config.get("memory.ddr.ports") or 1)}
+        gran_kb = float(cfg.get("granularity_KB", cur_gpu_config.get("memory.interleave_KB")))
         return cls(side, int(cfg.get("ports", defaults.get(side, 8))),
                    str(cfg.get("mode", "interleave")), int(gran_kb * 1024),
-                   int(cfg.get("addr_bits", hw.get("memory.addressing.addr_bits"))))
+                   int(cfg.get("addr_bits", cur_gpu_config.get("memory.addressing.addr_bits"))))
 
     def port_of(self, addr: int) -> int:
         if self.mode == "range":
@@ -181,7 +181,7 @@ class AddressReport:
                 f"{self.effective_ddr_fraction:.0%} of peak):\n{bar(self.ports, 'port')}")
 
 
-def spread(hw: HardwareSpec, addrs_bytes: list[tuple[int, int]]) -> AddressReport:
+def spread(cur_gpu_config: HardwareSpec, addrs_bytes: list[tuple[int, int]]) -> AddressReport:
     """Spread of a *concurrently touched* set of tiles over L2 slices and HBM ports.
 
     `addrs_bytes` is [(byte address of the tile, tile size)]. A tile is not a cache line: it
@@ -189,7 +189,7 @@ def spread(hw: HardwareSpec, addrs_bytes: list[tuple[int, int]]) -> AddressRepor
     those chunks map to. Which tiles are touched together is what the layout/swizzle decides —
     the full set of tile addresses is the same under any layout.
     """
-    lmap, dmap = AddressMap.from_hw(hw, "l2"), AddressMap.from_hw(hw, "ddr")
+    lmap, dmap = AddressMap.from_hw(cur_gpu_config, "l2"), AddressMap.from_hw(cur_gpu_config, "ddr")
     sl = [0.0] * lmap.ports
     po = [0.0] * dmap.ports
     inter = lmap.granularity
@@ -205,13 +205,13 @@ def spread(hw: HardwareSpec, addrs_bytes: list[tuple[int, int]]) -> AddressRepor
     return AddressReport(sl, po, imb(sl), imb(po), len(addrs_bytes), tile_bytes, inter)
 
 
-def gemm_wave_tiles(hw: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: float, b_bytes: float,
+def gemm_wave_tiles(cur_gpu_config: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: float, b_bytes: float,
                     layout_a: str = "row", layout_b: str = "row", resident: int = 1, k_step: int = 0):
     """Addresses of the A and B tiles touched together by one wave at K-step `k_step`."""
     import math
     from ..kernels.gemm import grouped_raster
     mt, nt, kt = math.ceil(M / tile.bm), math.ceil(N / tile.bn), math.ceil(K / tile.bk)
-    conc = hw.sms * max(1, resident)
+    conc = cur_gpu_config.sms * max(1, resident)
     a_tb, b_tb = int(tile.bm * tile.bk * a_bytes), int(tile.bn * tile.bk * b_bytes)
     base_b = int(M * K * a_bytes)
     seen_a, seen_b = {}, {}
@@ -223,27 +223,27 @@ def gemm_wave_tiles(hw: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: flo
     return ([(v, a_tb) for v in seen_a.values()], [(v, b_tb) for v in seen_b.values()])
 
 
-def analyze_gemm(hw: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: float, b_bytes: float,
+def analyze_gemm(cur_gpu_config: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: float, b_bytes: float,
                  layout_a: str = "row", layout_b: str = "row", resident: int = 1) -> dict:
     """Spread of the tiles a wave touches together, for both operands."""
-    ta, tb = gemm_wave_tiles(hw, M, N, K, tile, a_bytes, b_bytes, layout_a, layout_b, resident)
-    a, b = spread(hw, ta), spread(hw, tb)
-    both = spread(hw, ta + tb)
+    ta, tb = gemm_wave_tiles(cur_gpu_config, M, N, K, tile, a_bytes, b_bytes, layout_a, layout_b, resident)
+    a, b = spread(cur_gpu_config, ta), spread(cur_gpu_config, tb)
+    both = spread(cur_gpu_config, ta + tb)
     return {"A": a, "B": b, "both": both, "slice_imbalance": both.slice_imbalance,
             "port_imbalance": both.port_imbalance,
             "effective_l2_fraction": both.effective_l2_fraction,
             "effective_ddr_fraction": both.effective_ddr_fraction}
 
 
-def with_conflict_penalty(hw: HardwareSpec, report: dict) -> HardwareSpec:
+def with_conflict_penalty(cur_gpu_config: HardwareSpec, report: dict) -> HardwareSpec:
     """Fold the measured imbalance into the L2/DDR efficiency factors."""
-    return hw.override({
-        "efficiency.l2": hw.eff("l2") * report["effective_l2_fraction"],
-        "efficiency.ddr": hw.eff("ddr") * report["effective_ddr_fraction"],
+    return cur_gpu_config.override({
+        "efficiency.l2": cur_gpu_config.eff("l2") * report["effective_l2_fraction"],
+        "efficiency.ddr": cur_gpu_config.eff("ddr") * report["effective_ddr_fraction"],
     })
 
 
-def kernel_addr_fn(hw: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: float, b_bytes: float,
+def kernel_addr_fn(cur_gpu_config: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: float, b_bytes: float,
                    base: int = 0, layout_a: str = "row", layout_b: str = "row",
                    c_bytes: float = 2.0, block_m: int = 0, block_n: int = 0):
     """Address of the tile each action touches, for a representative block.
@@ -258,7 +258,7 @@ def kernel_addr_fn(hw: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: floa
     base_a = base
     base_b = base_a + int(M * K * a_bytes)
     base_c = base_b + int(K * N * b_bytes)
-    lmap, dmap = AddressMap.from_hw(hw, "l2"), AddressMap.from_hw(hw, "ddr")
+    lmap, dmap = AddressMap.from_hw(cur_gpu_config, "l2"), AddressMap.from_hw(cur_gpu_config, "ddr")
 
     def f(action: str, iteration: int):
         it = max(0, int(iteration))

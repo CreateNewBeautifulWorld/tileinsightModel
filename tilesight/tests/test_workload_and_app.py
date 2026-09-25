@@ -153,10 +153,10 @@ def test_slice_config_derives_and_translates():
     assert d["shader_cores"] == 8 * 20 and d["tensor_cores"] == 8 * 20 * 4
     assert abs(d["pflops_total"] - d["tflops_per_tensor_core"] * d["tensor_cores"] / 1000) < 1e-6
     assert d["hbm_capacity_GB"] == 8 * 24 and abs(d["hbm_TBps"] - 8.0) < 1e-9
-    hw = to_hardware_spec(cfg)
-    assert hw.validate() == [] and hw.sms == 160
-    assert hw.get("memory.l2.partitions") == 8          # one per memory slice
-    assert hw.get("compute.attention_tile_m") == 64
+    cur_gpu_config = to_hardware_spec(cfg)
+    assert cur_gpu_config.validate() == [] and cur_gpu_config.sms == 160
+    assert cur_gpu_config.get("memory.l2.partitions") == 8          # one per memory slice
+    assert cur_gpu_config.get("compute.attention_tile_m") == 64
     # L2 = 0 rewires the DMA straight to the buffer
     z = to_hardware_spec({**cfg, "memory_slice": {**cfg["memory_slice"], "l2_MB": 0}})
     assert z.dma_destination == "bypass"

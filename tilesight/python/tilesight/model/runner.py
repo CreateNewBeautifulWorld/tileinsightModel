@@ -108,7 +108,7 @@ def _apply_overlap(results: list["OpResult"], rc: RunConfig) -> None:
 @dataclass
 class ModelReport:
     model: str
-    hw: str
+    gpu_name: str
     rc: RunConfig
     ops: list[OpResult]
     memory: MemoryReport
@@ -176,62 +176,62 @@ class ModelReport:
         return toks / self.step_time_s / self.rc.world
 
 
-def _tile_policy(hw: HardwareSpec, key: str) -> str | dict:
+def _tile_policy(cur_gpu_config: HardwareSpec, key: str) -> str | dict:
     """compute.tile_policy.gemm/attn: "auto", a JSON string, or (already) a dict/'auto'."""
-    v = hw.get(f"compute.tile_policy.{key}")
+    v = cur_gpu_config.get(f"compute.tile_policy.{key}")
     return json.loads(v) if isinstance(v, str) and v != "auto" else v
 
 
-def _override(hw: HardwareSpec, name: str) -> dict | None:
-    for pat, fields in (hw.get("compute.tile_policy.overrides") or {}).items():
+def _override(cur_gpu_config: HardwareSpec, name: str) -> dict | None:
+    for pat, fields in (cur_gpu_config.get("compute.tile_policy.overrides") or {}).items():
         if fnmatch.fnmatch(name, pat):
             return fields
     return None
 
 
-def _eval_all(kernels: list[Kernel], hw) -> list[KernelResult]:
-    return [backend.evaluate(k, hw) for k in kernels]
+def _eval_all(kernels: list[Kernel], cur_gpu_config) -> list[KernelResult]:
+    return [backend.evaluate(k, cur_gpu_config) for k in kernels]
 
 
-def _best(cands, hw):
+def _best(cands, cur_gpu_config):
     best = None
     for tile, ks in cands:
         if ks is None:
             continue
-        res = _eval_all(ks, hw)
+        res = _eval_all(ks, cur_gpu_config)
         t = sum(r.time_s for r in res)
         if best is None or t < best[0]:
             best = (t, tile, res)
     return best
 
 
-def resolve_op(op: Op, hw: HardwareSpec, rc: RunConfig) -> tuple[list[KernelResult], str]:
+def resolve_op(op: Op, cur_gpu_config: HardwareSpec, rc: RunConfig) -> tuple[list[KernelResult], str]:
     p = op.p
     if op.kind == "gemm":
-        ov = _override(hw, op.name)
-        gemm_tile = _tile_policy(hw, "gemm")
+        ov = _override(cur_gpu_config, op.name)
+        gemm_tile = _tile_policy(cur_gpu_config, "gemm")
         if ov is not None:
             tiles = [TileConfig(**ov)]
         elif gemm_tile == "auto":
             tiles = gemm_search_space(p["M"], p["N"], p["K"])
         else:
             tiles = [TileConfig(**gemm_tile)]
-        cands = ((t, lower_gemm(hw, op.name, p["M"], p["N"], p["K"], batch=p["batch"], a_dtype=p["a_dtype"],
+        cands = ((t, lower_gemm(cur_gpu_config, op.name, p["M"], p["N"], p["K"], batch=p["batch"], a_dtype=p["a_dtype"],
                                 b_dtype=p["b_dtype"], c_dtype=p["c_dtype"], compute_dtype=p["compute_dtype"],
                                 tile=t, names=tuple(p.get("names", ("act", "weight", "out"))))) for t in tiles)
-        best = _best(cands, hw)
+        best = _best(cands, cur_gpu_config)
         if best is None:
             raise ValueError(f"{op.name}: no legal tile among {len(tiles)} candidates")
         return best[2], best[2][0].meta.get("tile", best[1].short())
 
     if op.kind in ("attn_decode", "attn_prefill"):
-        ov = _override(hw, op.name)
-        attn_tile = _tile_policy(hw, "attn")
+        ov = _override(cur_gpu_config, op.name)
+        attn_tile = _tile_policy(cur_gpu_config, "attn")
         if ov is not None:
             tiles = [AttnTileConfig(**ov)]
-        elif hw.get("compute.attention_tile_m") and hw.get("compute.attention_tile_n"):
+        elif cur_gpu_config.get("compute.attention_tile_m") and cur_gpu_config.get("compute.attention_tile_n"):
             # the part fixes the attention tile: search only the pipeline knobs around it
-            bm, bn = int(hw.get("compute.attention_tile_m")), int(hw.get("compute.attention_tile_n"))
+            bm, bn = int(cur_gpu_config.get("compute.attention_tile_m")), int(cur_gpu_config.get("compute.attention_tile_n"))
             tiles = [AttnTileConfig(block_m=bm, block_n=bn, stages=st, consumers=c)
                      for st in (2, 3) for c in (1, 2)]
         elif attn_tile == "auto":
@@ -241,11 +241,11 @@ def resolve_op(op: Op, hw: HardwareSpec, rc: RunConfig) -> tuple[list[KernelResu
         kw = dict(B=p["B"], H=p["H"], kv_heads=p["kv_heads"], S=p["S"], d_qk=p["d_qk"], d_v=p["d_v"],
                   kv_dtype=rc.kv_dtype, compute_dtype=rc.attn_compute_dtype)
         if op.kind == "attn_decode":
-            cands = ((t, lower_attention_decode(hw, op.name, v_in_k=p["v_in_k"], tile=t, **kw)) for t in tiles)
+            cands = ((t, lower_attention_decode(cur_gpu_config, op.name, v_in_k=p["v_in_k"], tile=t, **kw)) for t in tiles)
         else:
-            cands = ((t, lower_attention_prefill(hw, op.name, tile=t, causal=p.get("causal", True),
+            cands = ((t, lower_attention_prefill(cur_gpu_config, op.name, tile=t, causal=p.get("causal", True),
                                                  window=p.get("window", 0), **kw)) for t in tiles)
-        best = _best(cands, hw)
+        best = _best(cands, cur_gpu_config)
         if best is None:
             raise ValueError(f"{op.name}: no legal attention tile")
         return best[2], best[2][0].meta.get("tile", best[1].short())
@@ -254,25 +254,25 @@ def resolve_op(op: Op, hw: HardwareSpec, rc: RunConfig) -> tuple[list[KernelResu
         q = dict(p)
         if "names" in q:
             q["names"] = tuple(q["names"])
-        return _eval_all(lower_elementwise(hw, op.name, **q), hw), "-"
+        return _eval_all(lower_elementwise(cur_gpu_config, op.name, **q), cur_gpu_config), "-"
     if op.kind == "allreduce":
-        return _eval_all(comm.allreduce(hw, op.name, p["bytes"], p["group"]), hw), "-"
+        return _eval_all(comm.allreduce(cur_gpu_config, op.name, p["bytes"], p["group"]), cur_gpu_config), "-"
     if op.kind == "a2a":
-        return _eval_all(comm.all_to_all(hw, op.name, p["bytes"], p["group"]), hw), "-"
+        return _eval_all(comm.all_to_all(cur_gpu_config, op.name, p["bytes"], p["group"]), cur_gpu_config), "-"
     raise ValueError(op.kind)
 
 
-def _install_sram_footprints(model: ModelSpec, rc: RunConfig, hw: HardwareSpec, groups) -> HardwareSpec:
+def _install_sram_footprints(model: ModelSpec, rc: RunConfig, cur_gpu_config: HardwareSpec, groups) -> HardwareSpec:
     """Tell the on-chip buffer how big each tensor category is on this GPU (see resident_frac)."""
-    if hw.sram is None:
-        return hw
+    if cur_gpu_config.sram is None:
+        return cur_gpu_config
     from .memory import kv_bytes_per_seq_all
     weights = sum(op.weight_bytes * rep for _, rep, ops in groups for op in ops)
     kv = kv_bytes_per_seq_all(model, rc, rc.seq_len) * rc.seqs_per_rank
     act = max((p["M"] * p["N"] * p.get("batch", 1) * 2 if op.kind == "gemm" else
                p.get("bytes_out", 0.0) for _, _, ops in groups for op in ops for p in [op.p]),
               default=0.0)
-    return hw.override({"memory.sram.footprint": {"weight": weights, "kv": kv, "act": act}})
+    return cur_gpu_config.override({"memory.sram.footprint": {"weight": weights, "kv": kv, "act": act}})
 
 
 @dataclass
@@ -293,14 +293,14 @@ def run(cur_gpu_config: HardwareSpec, cur_model_config: CurModelConfig, progress
     return run_model(cur_model_config.spec, cur_gpu_config, cur_model_config.run, progress=progress)
 
 
-def run_model(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, progress=None) -> ModelReport:
-    """Internal engine entry point (model, hw, rc positional) — kernels/lowering/report code and
+def run_model(model: ModelSpec, cur_gpu_config: HardwareSpec, rc: RunConfig, progress=None) -> ModelReport:
+    """Internal engine entry point (model, cur_gpu_config, rc positional) — kernels/lowering/report code and
     existing scripts use this directly. `run(cur_gpu_config, cur_model_config)` above is the
     boundary-facing wrapper; prefer it in new CLI/server/UI code.
 
     progress(done, total, label) is called per op so UIs can show a processing state."""
     groups = lower_model(model, rc)
-    hw = _install_sram_footprints(model, rc, hw, groups)
+    cur_gpu_config = _install_sram_footprints(model, rc, cur_gpu_config, groups)
     results = []
     total = sum(len(ops) for _, _, ops in groups)
     done = 0
@@ -309,11 +309,11 @@ def run_model(model: ModelSpec, hw: HardwareSpec, rc: RunConfig, progress=None) 
             if progress:
                 progress(done, total, op.name)
             done += 1
-            ks, tile = resolve_op(op, hw, rc)
+            ks, tile = resolve_op(op, cur_gpu_config, rc)
             results.append(OpResult(op, gname, rep, ks, tile, 1.0))
     _apply_overlap(results, rc)
-    mem = memory_report(model, rc, groups, hw)
-    rep = ModelReport(model.name, hw.name, rc, results, mem)
+    mem = memory_report(model, rc, groups, cur_gpu_config)
+    rep = ModelReport(model.name, cur_gpu_config.name, rc, results, mem)
     if not mem.fits:
         rep.notes.append(f"DOES NOT FIT: needs {mem.total_GB:.1f} GB > {mem.capacity_GB:.1f} GB per GPU")
     return rep

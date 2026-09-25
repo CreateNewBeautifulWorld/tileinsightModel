@@ -81,7 +81,7 @@ def bound_report(rep, top: int = 12) -> str:
 def model_summary(rep, top: int = 25) -> str:
     rc = rep.rc
     L = []
-    L.append(f"== {rep.model} on {rep.hw}  [{rc.phase}] batch={rc.batch} seq={rc.seq_len} "
+    L.append(f"== {rep.model} on {rep.gpu_name}  [{rc.phase}] batch={rc.batch} seq={rc.seq_len} "
              f"tp={rc.tp} dp={rc.dp} ep={rc.ep_size} (backend={rep.backend})")
     L.append(f"step time      : {_fmt_t(rep.step_time_s).strip()}")
     if rc.phase == "decode":

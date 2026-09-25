@@ -11,9 +11,9 @@ from tilesight.dse.buffer import l2_tradeoff, with_buffer
 HW = HardwareSpec.load("b300")
 
 
-def _k(hw, path="tma", **kw):
+def _k(cur_gpu_config, path="tma", **kw):
     t = TileConfig(bm=128, bn=256, bk=64, load_path=path, **kw)
-    ks = lower_gemm(hw, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
+    ks = lower_gemm(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
                     compute_dtype="fp8", tile=t)
     return ks[0] if ks else None
 
@@ -96,11 +96,11 @@ def test_independent_latency_only_costs_fill_but_loop_carried_costs_throughput()
     assert rb.breakdown["fill"] > ra.breakdown["fill"]
     assert abs(rb.breakdown["steady"] - ra.breakdown["steady"]) < 1e-9
     # the online-softmax chain in attention IS loop-carried: its latency hits the steady state
-    def attn(hw):
-        k = lower_attention_decode(hw, "a", B=32, H=64, kv_heads=1, S=8192, d_qk=576, d_v=512,
+    def attn(cur_gpu_config):
+        k = lower_attention_decode(cur_gpu_config, "a", B=32, H=64, kv_heads=1, S=8192, d_qk=576, d_v=512,
                                    v_in_k=True, tile=__import__("tilesight").kernels.tiles
                                    .AttnTileConfig(block_m=64, block_n=64, stages=2, consumers=1))[0]
-        return backend.evaluate(k, hw)
+        return backend.evaluate(k, cur_gpu_config)
     slow_sfu = HW.override({"compute.sfu_latency_cycles": 4096})
     assert attn(slow_sfu).time_s > attn(HW).time_s
 

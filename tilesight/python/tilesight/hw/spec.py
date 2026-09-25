@@ -2,7 +2,7 @@
 
 The hardware is a plain nested dict loaded from YAML (see hw/db/*.yaml) so that
 design-space experiments can override ANY field by dotted path, e.g.
-    hw.override({"memory.ddr.bandwidth_TBps": 12.0})
+    cur_gpu_config.override({"memory.ddr.bandwidth_TBps": 12.0})
 
 `HardwareSpec.lanes()` turns the description into the resource lanes used by the
 engine (docs/DESIGN.md §2).  Two kinds of lanes:

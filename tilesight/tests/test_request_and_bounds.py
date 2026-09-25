@@ -78,14 +78,14 @@ def test_timeline_matches_engine_round_and_lanes():
     from tilesight.kernels.gemm import lower_gemm as lg
     from tilesight.report.timeline import steady_timeline, timeline_text
     from tilesight.engine import backend
-    hw = B300
-    k = lg(hw, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    cur_gpu_config = B300
+    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
-    tl = steady_timeline(k, hw)
-    r = backend.evaluate(k, hw)
+    tl = steady_timeline(k, cur_gpu_config)
+    r = backend.evaluate(k, cur_gpu_config)
     # the timeline's round x iters reproduces the engine's steady time (first wave)
     assert abs(tl["round_s"] - max(tl["resource_bound_s"], tl["latency_bound_s"])) < 1e-15
-    assert abs(tl["total_s"] * (k.num_blocks / (hw.sms * tl["resident"])) - r.time_s) / r.time_s < 0.35
+    assert abs(tl["total_s"] * (k.num_blocks / (cur_gpu_config.sms * tl["resident"])) - r.time_s) / r.time_s < 0.35
     assert tl["limiter"] == "tc" and "tc" in tl["lanes"] and "ddr" in tl["lanes"]
     # every steady item lies inside the drawn window and loads are prefetches
     for it in tl["steady"]:
@@ -111,21 +111,21 @@ def test_timeline_reflects_the_bottleneck():
 def test_timeline_cycles_and_trace_text():
     from tilesight.kernels.gemm import lower_gemm as lg
     from tilesight.report.timeline import steady_timeline, timeline_text, trace_text
-    hw = B300
-    k = lg(hw, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    cur_gpu_config = B300
+    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
-    tl = steady_timeline(k, hw)
+    tl = steady_timeline(k, cur_gpu_config)
     # cycles are seconds x clock, consistently on every item
-    assert abs(tl["round_cyc"] - tl["round_s"] * hw.clock_hz) < 1e-9
+    assert abs(tl["round_cyc"] - tl["round_s"] * cur_gpu_config.clock_hz) < 1e-9
     for it in tl["steady"]:
-        assert abs(it["start_cyc"] - it["start"] * hw.clock_hz) < 1e-6
+        assert abs(it["start_cyc"] - it["start"] * cur_gpu_config.clock_hz) < 1e-6
         for lane, v in it["lanes"].items():
-            assert abs(it["lanes_cyc"][lane] - v * hw.clock_hz) < 1e-6
+            assert abs(it["lanes_cyc"][lane] - v * cur_gpu_config.clock_hz) < 1e-6
     # wave decomposition is reported (paper §3.4)
-    assert tl["full_waves"] * hw.sms * tl["resident"] + tl["tail_blocks"] == k.num_blocks
+    assert tl["full_waves"] * cur_gpu_config.sms * tl["resident"] + tl["tail_blocks"] == k.num_blocks
     # both gantt units render
     assert "cyc" in timeline_text(tl, unit="cyc") and "us" in timeline_text(tl)
-    txt = trace_text(tl, "gemm", hw.name)
+    txt = trace_text(tl, "gemm", cur_gpu_config.name)
     for needle in ("start_cyc", "gantt (cycles)", "lane occupancy in one round", "blocks ->"):
         assert needle in txt
     # every steady action appears as an event row
@@ -137,16 +137,16 @@ def test_cycle_csv_one_row_per_cycle_one_column_per_unit():
     import io
     from tilesight.kernels.gemm import lower_gemm as lg
     from tilesight.report.timeline import cycle_csv, machine_timeline, steady_timeline
-    hw = B300
-    k = lg(hw, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    cur_gpu_config = B300
+    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
-    tl = steady_timeline(k, hw)
+    tl = steady_timeline(k, cur_gpu_config)
     rows = list(_csv.DictReader(io.StringIO(cycle_csv(tl))))
     lanes = tl["lanes"]
     assert set(rows[0]) == {"cycle", "time_ns", "phase", "round"} | set(lanes) | {f"{l}_busy" for l in lanes}
     # consecutive cycles, time matches the clock, busy fractions in [0,1]
     assert [int(r["cycle"]) for r in rows[:50]] == list(range(50))
-    assert abs(float(rows[10]["time_ns"]) - 10 / hw.clock_hz * 1e9) < 0.01   # CSV keeps 2 decimals
+    assert abs(float(rows[10]["time_ns"]) - 10 / cur_gpu_config.clock_hz * 1e9) < 0.01   # CSV keeps 2 decimals
     for r in rows[:200]:
         for l in lanes:
             b = float(r[f"{l}_busy"])
@@ -159,7 +159,7 @@ def test_cycle_csv_one_row_per_cycle_one_column_per_unit():
     assert len(cycle_csv(tl, full=True).splitlines()) > len(cycle_csv(tl).splitlines())
     m = machine_timeline(tl)
     assert sum(w["blocks"] for w in m["waves"]) == k.num_blocks
-    assert m["waves"][-1]["active_sms"] <= hw.sms
+    assert m["waves"][-1]["active_sms"] <= cur_gpu_config.sms
 
 
 def test_excel_grid_colours_tiles_by_iteration(tmp_path):
@@ -167,13 +167,13 @@ def test_excel_grid_colours_tiles_by_iteration(tmp_path):
     from tilesight.kernels.gemm import lower_gemm as lg
     from tilesight.report.excel import write_excel
     from tilesight.report.timeline import steady_timeline
-    hw = B300
-    k = lg(hw, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    cur_gpu_config = B300
+    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, stages=4, cluster_m=2))[0]
-    tl = steady_timeline(k, hw)
+    tl = steady_timeline(k, cur_gpu_config)
     assert tl["rounds_shown"] >= k.stages          # load and its consumer both visible
     out = tmp_path / "t.xlsx"
-    info = write_excel(tl, str(out), "gemm", hw.name)
+    info = write_excel(tl, str(out), "gemm", cur_gpu_config.name)
     ws = load_workbook(out)["timeline"]
     # row 1 is the unit-section band, row 2 the column names
     assert [c.value for c in ws[2]][:4] == ["cycle", "time_ns", "phase", "round"]
