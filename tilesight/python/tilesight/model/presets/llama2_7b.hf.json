@@ -1,0 +1,12 @@
+{
+  "_comment": "Shape fields of meta-llama/Llama-2-7b config.json (plain MHA example).",
+  "_name_or_path": "llama2-7b",
+  "model_type": "llama",
+  "hidden_size": 4096,
+  "intermediate_size": 11008,
+  "num_hidden_layers": 32,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 32,
+  "vocab_size": 32000,
+  "tie_word_embeddings": false
+}

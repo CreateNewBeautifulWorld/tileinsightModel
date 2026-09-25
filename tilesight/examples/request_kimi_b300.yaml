@@ -1,0 +1,15 @@
+# Request-level run: tilesight request --model kimi_k2.hf --hw b300 --run-config examples/request_kimi_b300.yaml
+batch: 256            # concurrent requests (global)
+tp: 1
+dp: 8
+ep: 8
+prompt_len: 8192      # prompt tokens per request  -> prefill / TTFT, initial KV
+output_len: 4096      # generated tokens           -> KV grows to prompt+output, TPOT curve
+page_size: 64         # paged KV: memory reserved in whole pages
+kv_reserve: peak      # peak: reserve prompt+output per request up front | current
+decode_samples: 5     # KV lengths sampled between prompt+1 and prompt+output
+prefill_batch: 8      # sequences prefilled together (limits prefill activation peak)
+weight_dtype: fp8
+expert_dtype: fp8
+kv_dtype: bf16
+attn_impl: flash

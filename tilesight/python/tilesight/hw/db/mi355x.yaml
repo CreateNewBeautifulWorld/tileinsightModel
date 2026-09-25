@@ -1,0 +1,66 @@
+# AMD Instinct MI355X (CDNA4).  See mi300x.yaml for the naming conventions.
+name: MI355X
+arch: cdna4
+sms: 256                 # [spec] CUs (8 XCD x 32)
+clock_ghz: 2.4           # [spec]
+dies: 8
+wavefront: 64
+
+compute:
+  tc_dense_tflops:       # [spec] dense matrix core
+    fp4: 9200            # MXFP4 / FP4
+    fp6: 9200            # [spec] CDNA4 runs FP6 at the FP4 rate
+    fp8: 4600
+    int8: 4600           # TOPS
+    bf16: 2300
+    fp16: 2300
+  tc_min_m: 16
+  mma_latency_cycles: 64      # [calib] one MFMA tile, issue-to-result
+  cuda_latency_cycles: 4      # [calib]
+  sfu_latency_cycles: 24      # [calib]           # [spec] MFMA 16x16x32 / 32x32x16
+  cta_pair: false
+  cuda_fp32_tflops: 157.3   # [spec] vector FP32
+  sfu_tops: 9.8          # [spec-derived] CUs x 16 x clock
+efficiency: {tc: 0.85, cuda: 0.75, sfu: 0.45, ddr: 0.85, l2: 0.80, smem: 0.85}
+
+memory:
+  queueing: {coef: 0.5, max_factor: 3.0}   # [calib] M/D/1-style latency inflation
+  outstanding: {per_sm_lines: 256, dma_per_engine_lines: 1024}   # [calib] MSHR-style limit
+  dma: {engines: 8, per_l2_block: true, destination: smem}     # [calib]
+  l1: {owner: sm, capacity_KB: 64, smem_carveout_KB: 0, cluster_size: 1, cache_global_loads: true, capacity_derate: 1.0, bytes_per_clk: 128, latency_cycles: 30, policy: lru}   # derate 1.0 = no loss by default
+  interleave_KB: 1       # [calib]
+  addressing:            # dump with `tilesight addrmap`
+    addr_bits: 48
+    l2:  {ports: 32, mode: interleave, granularity_KB: 1}   # [calib]
+    ddr: {ports: 8, mode: interleave, granularity_KB: 1}   # [calib/spec] one per stack
+  ddr: {capacity_GB: 288, bandwidth_TBps: 8.0, latency_ns: 900}     # [spec] HBM3e
+  l2:
+    capacity_derate: 1.0    # DEFAULT: no loss; lower it only with a measurement
+    capacity_derate: 1.0    # DEFAULT: no loss. Lower it only with a measurement to back it up.
+    partitions: 8        # [calib] independent L2 partitions (tile-level LRU each)
+    policy: lru
+    waves_simulated: 2
+    blocks: 8            # [calib] independent L2 blocks, each with its own port(s)
+    ports_per_block: 1
+    bytes_per_clk_per_port: 2048   # [calib]
+    line_bytes: 128
+    sector_bytes: 64
+    capacity_MB: 256                 # [spec] Infinity Cache (MALL)
+    # effective_capacity_MB: 200   # optional override [calib]
+    assoc: 16
+    bandwidth_TBps: 20.0             # [calib]
+    latency_ns: 480
+    per_sm_max_GBps: 80              # [calib]
+  onchip:
+    smem: {capacity_KB: 160, bytes_per_clk: 128, latency_cycles: 40}   # [spec] LDS per CU grew to 160 KB on CDNA4
+
+load_paths:
+  buffer_lds: {engine: dma, per_sm_GBps: 140, latency_ns: 120, smem_direct: true, multicast: false, regs_per_thread: 0, issue_bytes_per_clk: 0}  # [calib] CDNA4 widened the direct path to 128 bit/lane
+  lsu: {engine: lsu, per_sm_GBps: 90, latency_ns: 80, smem_direct: false, multicast: false, regs_per_thread: 16, issue_bytes_per_clk: 64}
+load_paths_default: buffer_lds
+
+occupancy: {max_blocks_per_sm: 16, max_threads_per_sm: 2048, regs_per_sm: 131072, max_regs_per_thread: 512}
+network:
+  nvlink: {domain_size: 8, bandwidth_GBps: 1075, alpha_us: 4.0}     # [spec] Infinity Fabric
+  scaleout: {bandwidth_GBps: 50, alpha_us: 9.0}
+runtime: {launch_overhead_us: 3.0}

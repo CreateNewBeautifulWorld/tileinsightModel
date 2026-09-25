@@ -1,0 +1,158 @@
+# NVIDIA B300 (Blackwell Ultra, SM100-class, dual-die).
+# Every number is tagged: [spec] = vendor/public figure, [calib] = placeholder that
+# MUST be replaced by the microbenchmark suite (docs/TASKS.md, Phase C).
+name: B300
+arch: sm100
+sms: 160                 # [spec] full-chip count per NVIDIA "Inside Blackwell Ultra"; shipping SKU may differ -> verify with deviceQuery
+clock_ghz: 1.9           # [calib]
+dies: 2                  # [spec] two dies over NV-HBI (10 TB/s); used by far-L2 hook (TODO)
+
+compute:
+  tc_dense_tflops:       # [spec] dense (no sparsity) tensor-core peak, whole GPU
+    fp4: 15000
+    fp8: 4500
+    bf16: 2250
+    fp16: 2250
+    int8: 330            # [spec] Blackwell Ultra trades INT8 throughput for NVFP4
+    tf32: 1125           # [spec]
+  tc_min_m: 64           # [spec] tcgen05.mma cta_group::1 minimum M; smaller tiles are padded
+  # per-unit latency: issue-to-result for ONE operation on that unit (throughput is separate).
+  # Configure in cycles; these lengthen dependency chains and the pipeline fill, not the rate.
+  mma_latency_cycles: 64      # [calib] one tile MMA; microbenchmarks report ~11 for tcgen05 issue
+  cuda_latency_cycles: 4      # [calib]
+  sfu_latency_cycles: 16      # [calib] exp/transcendental
+  cta_pair: true
+  cluster_multicast: true   # [spec] thread-block clusters + TMA multicast         # [spec] tcgen05 cta_group::2 (2-CTA MMA shares B operand across a CTA pair)
+  cuda_fp32_tflops: 75   # [spec]
+  sfu_tops: 9.4          # [spec-derived] ~2x B200 exp throughput (Blackwell Ultra doubles SFU for attention)
+
+efficiency:              # achievable/peak ratios  [calib]
+  tc: 0.92
+  cuda: 0.80
+  sfu: 0.95
+  ddr: 0.88
+  l2: 0.85
+  sram: 0.90             # [calib] used only when memory.sram is configured
+  smem: 0.90
+
+memory:
+  interleave_KB: 2       # [calib] default interleave granularity (overridden per side below)
+  queueing:              # a lane near saturation also makes every access wait (M/D/1 waiting time
+                         # W = u/(2(1-u))*S), modelled as a latency multiplier, capped.
+    coef: 0.5            # [calib] 0 disables it
+    max_factor: 3.0      # [calib]
+  outstanding:           # memory-level parallelism (MSHR-style). Little's law bounds per-SM
+                         # bandwidth: BW_per_SM <= lines x line_bytes / latency, so a level with
+                         # a long latency needs many lines in flight to reach its peak.
+    per_sm_lines: 512    # [calib] cache lines in flight per SM
+    dma_per_engine_lines: 1024   # [calib]
+  dma:
+    engines: 8           # [calib] copy engines
+    per_l2_block: true   # [calib] one engine per L2 block (false = a single shared engine)
+    destination: smem    # smem | l2 | bypass — where the engine drops the data
+  l1:
+    owner: cluster       # [spec] sm | cluster (Hopper/Blackwell clusters share through DSMEM)
+    capacity_KB: 256     # [spec] unified L1 + SMEM per SM
+    smem_carveout_KB: 228   # [spec] what the tile plan takes as scratchpad; the rest caches loads
+    cluster_size: 2      # [spec] SMs per cluster when owner = cluster
+    cache_global_loads: true   # false = loads bypass L1 (Ampere+ cp.async style)
+    capacity_derate: 1.0       # DEFAULT: no loss (see memory.l2.capacity_derate)
+    bytes_per_clk: 128         # [calib]
+    latency_cycles: 20         # [calib]
+    policy: lru
+  addressing:            # which unit owns which address — dump it with `tilesight addrmap`
+    addr_bits: 48        # [spec] physical address width
+    l2:                  # L2 slices / load ports
+      ports: 16          # [calib]
+      mode: interleave   # interleave | range | hash   (hash breaks power-of-two stride aliasing)
+      granularity_KB: 1  # [calib] 1 KB stripes is the common choice
+    ddr:                 # HBM ports (what the DMA engines target)
+      ports: 8           # [spec] one per HBM3e stack
+      mode: interleave
+      granularity_KB: 1  # [calib]
+  ddr:                   # HBM3e
+    capacity_GB: 288     # [spec] (HGX air-cooled SKUs expose ~262 GB; set accordingly)
+    bandwidth_TBps: 8.0  # [spec]
+    latency_ns: 850      # [calib]
+  l2:
+    capacity_derate: 1.0    # DEFAULT: no loss; lower it only with a measurement
+    capacity_MB: 126     # [spec-unverified] B200-class; TileSight measured an effective cliff ~83 MB on B200
+    capacity_derate: 1.0    # DEFAULT: no loss — the simulation may use the whole capacity.
+                            # Set it below 1 to account for what the tile-level simulation does
+                            # NOT model (line granularity, conflicts inside a partition, other
+                            # kernels' traffic, streaming hints). Calibrate against NCU
+                            # lts__t_sector_hit_rate; TileSight measured an effective ~83 MB
+                            # cliff on B200-class parts, i.e. a derate of ~0.66.
+    # # effective_capacity_MB: 83   # optional direct override (measured cliff)
+    assoc: 16            # [calib]
+    bandwidth_TBps: 20.5 # [calib] TileSight Table 3 value for B200
+    latency_ns: 350      # [calib]
+    per_sm_max_GBps: 180 # [calib] max global-memory throughput one SM can pull; limits under-filled grids
+    slices: 16           # [calib] L2 slices; used by the tile-granularity address model
+    partitions: 4        # [calib] independent L2 partitions; each holds whole tiles and runs
+                         # its own replacement. A tile goes to the partition its ADDRESS maps to.
+    policy: lru          # lru | fifo | mru — hardware-managed replacement, simulated exactly
+    model: lru           # lru (deterministic simulation) | sdcm (the paper's probabilistic model)
+    waves_simulated: 2   # replay this many waves so cross-wave reuse is visible
+    blocks: 4            # [calib] physically independent L2 blocks, each with its own port(s)
+    ports_per_block: 1   # [calib] load/store ports per block
+    bytes_per_clk_per_port: 3072   # [calib] width of one port; blocks x ports x width x clock
+                                   # caps the level regardless of the quoted aggregate bandwidth
+    line_bytes: 128      # [spec] cache line
+    sector_bytes: 32     # [spec] sector (the granularity a miss actually fetches)
+    apply_conflict_penalty: false   # true -> fold measured slice imbalance into efficiency.l2
+  # OPTIONAL extra on-chip shared buffer (not present on real B300 — a design-study knob).
+  # Uncomment (or add via --set) to stage A/B tiles on chip and cut HBM traffic:
+  # sram:
+  #   capacity_MB: 64
+  #   # effective_capacity_MB: 56   # optional override [calib]
+  #   bandwidth_TBps: 15.0        # [calib]
+  #   latency_ns: 400             # [calib]
+  #   assoc: 16
+  #   per_sm_max_GBps: 180
+  onchip:                # per-SM scratchpads -> each becomes a resource lane
+    smem:
+      capacity_KB: 228
+      bytes_per_clk: 128 # [spec] per SM
+      latency_cycles: 30 # [calib] SMEM/LDS access latency
+    tmem:
+      capacity_KB: 256   # [spec] 512 cols x 128 lanes x 32 bit
+      read_TBps: 16.0    # [calib] per SM
+      write_TBps: 8.0    # [calib] per SM
+      latency_cycles: 16 # [calib]
+
+load_paths:              # alternative global->on-chip routes; an action picks one or splits bytes
+  tma:                   # DMA engine: one thread issues a descriptor, writes SMEM directly
+    engine: dma
+    per_sm_GBps: 220     # [calib] bulk async copy engine issue limit
+    latency_ns: 100      # [calib] issue overhead; memory latency comes from l2/ddr latency_ns
+    smem_direct: true    # no register staging
+    multicast: true      # one fetch can feed a whole thread-block cluster
+    regs_per_thread: 0
+    issue_bytes_per_clk: 0     # does not consume SM instruction issue
+  lsu:                   # ordinary vector loads (cp.async / ld.global)
+    engine: lsu
+    per_sm_GBps: 140     # [calib]
+    latency_ns: 50
+    smem_direct: false   # data lands in registers first (cp.async is the exception)
+    multicast: false
+    regs_per_thread: 16  # [calib] address + staging registers, costs occupancy
+    issue_bytes_per_clk: 64    # [calib] address generation occupies SM issue slots
+
+occupancy:
+  max_blocks_per_sm: 32
+  max_threads_per_sm: 2048
+  regs_per_sm: 65536
+  max_regs_per_thread: 255
+
+network:
+  nvlink:
+    domain_size: 8       # 8 for HGX B300, 72 for GB300 NVL72
+    bandwidth_GBps: 900  # [spec] per direction per GPU (1.8 TB/s bidirectional)
+    alpha_us: 3.0        # [calib]
+  scaleout:
+    bandwidth_GBps: 100  # [spec] ConnectX-8 800 Gb/s
+    alpha_us: 8.0        # [calib]
+
+runtime:
+  launch_overhead_us: 2.0   # per kernel; ~0.5-1 with CUDA graphs  [calib]

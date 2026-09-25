@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TileSight — single-GPU model</title>
+<style>
+  :root{--bg:#fbfbfa;--panel:#fff;--ink:#1d1c1a;--muted:#6b6a67;--line:#e3e1dd;--accent:#b4552d;
+    --soft:#f4ece7;--ok:#2f7d54;--warn:#b3261e;--mono:ui-monospace,Menlo,Consolas,monospace;
+    box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161514;--panel:#1f1e1c;
+    --ink:#ece9e4;--muted:#a09d97;--line:#33312e;--accent:#e0794c;--soft:#2a221d;--ok:#6cc08b;--warn:#f0857d}}
+  *,*::before,*::after{box-sizing:inherit}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{max-width:1120px;margin:0 auto;padding:20px 20px 0}
+  h1{font-size:19px;margin:0 0 10px}
+  .steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+  .steps div{font-size:12px;padding:6px 12px;border-radius:20px;background:var(--panel);
+    border:1px solid var(--line);color:var(--muted)}
+  .steps div.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .steps div.done{color:var(--ok);border-color:var(--ok)}
+  main{max-width:1120px;margin:0 auto;padding:0 20px 60px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 12px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
+  input,select,textarea,button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);
+    border-radius:7px;padding:7px 9px;width:100%}
+  textarea{font-family:var(--mono);font-size:12px;min-height:90px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+  .card{border:1px solid var(--line);border-radius:10px;padding:14px;cursor:pointer;background:var(--bg)}
+  .card:hover{border-color:var(--accent)}
+  .card.sel{border-color:var(--accent);background:var(--soft)}
+  .card b{display:block;font-size:15px;margin-bottom:4px}
+  .card span{font-size:12px;color:var(--muted);line-height:1.5}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  button.go{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;width:auto;padding:9px 20px;cursor:pointer}
+  button.ghost{width:auto;padding:9px 16px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .bar{height:8px;background:var(--soft);border-radius:5px;overflow:hidden;margin:10px 0}
+  .bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .25s}
+  .log{font-family:var(--mono);font-size:11.5px;background:var(--bg);border:1px solid var(--line);
+    border-radius:8px;padding:10px;height:132px;overflow:auto;white-space:pre-wrap;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:5px 7px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .mono{font-family:var(--mono);font-size:11.5px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px}
+  .kpi{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .kpi b{display:block;font-size:19px} .kpi span{font-size:11px;color:var(--muted);text-transform:uppercase}
+  .hint{font-size:12px;color:var(--muted)} .err{color:var(--warn);font-family:var(--mono);font-size:12px;white-space:pre-wrap}
+  .scroll{overflow-x:auto} details summary{cursor:pointer;font-size:12px;color:var(--muted)}
+  .sec{margin-top:18px}
+</style>
+</head>
+<body>
+<header>
+  <h1>TileSight — single-GPU analytical model</h1>
+  <div class="steps">
+    <div id="s1" class="on">1 · GPU</div><div id="s2">2 · config</div>
+    <div id="s3">3 · workload</div><div id="s4">4 · run</div><div id="s5">5 · results</div>
+  </div>
+</header>
+<main>
+
+<section id="p1" class="panel">
+  <h2>Step 1 — pick the GPU</h2>
+  <div class="cards" id="gpucards"></div>
+  <div class="row"><button class="go" onclick="go(2)">Next</button></div>
+</section>
+
+<section id="p2" class="panel" style="display:none">
+  <h2>Step 2 — hardware config</h2>
+  <div class="hint" id="cfgnote"></div>
+  <div class="row" style="margin-top:8px">
+    <button class="ghost" onclick="setMode('slice')" id="mslice">slice config (architect view)</button>
+    <button class="ghost" onclick="setMode('flat')" id="mflat">flat YAML (datasheet view)</button>
+  </div>
+  <div id="sliceform"></div>
+  <div id="derived" class="sec"></div>
+  <div id="flatbox" style="display:none">
+  <div class="row" style="margin-top:8px">
+    <button class="ghost" onclick="loadPreset()">load the selected preset as a starting point</button>
+    <button class="ghost" onclick="validateHw()">validate</button>
+  </div>
+  <label>Hardware YAML (the model only ever sees these fields — see /api/schema)</label>
+  <textarea id="hwyaml" style="min-height:280px"></textarea>
+  <div id="hwmsg" class="hint"></div>
+  </div>
+  <div class="row"><button class="ghost" onclick="go(1)">Back</button><button class="go" onclick="go(3)">Next</button></div>
+</section>
+
+<section id="p3" class="panel" style="display:none">
+  <h2>Step 3 — what runs on this GPU</h2>
+  <div class="hint">One transformer layer: attention + FFN. Multi-GPU mapping is out of scope here.</div>
+  <div id="wlform"></div>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:12px">
+    <input type="checkbox" id="cmpattn" style="width:auto"> also run it without flash attention, for comparison</label>
+  <div class="row"><button class="ghost" onclick="go(2)">Back</button><button class="go" onclick="run()">Run model</button></div>
+</section>
+
+<section id="p4" class="panel" style="display:none">
+  <h2>Step 4 — running</h2>
+  <div id="plabel" class="hint">starting…</div>
+  <div class="bar"><i id="fill"></i></div>
+  <div class="log" id="log"></div>
+  <div class="row"><button class="ghost" onclick="go(3)">Back</button></div>
+</section>
+
+<section id="p5" class="panel" style="display:none">
+  <h2>Step 5 — results</h2>
+  <div id="results"></div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const API=location.origin.startsWith("http")?location.origin:"http://127.0.0.1:8000";
+let OPTS=null, SCHEMA=null, SLICE=null, GPU="b300", CUSTOM=false, JOB=null, HWMODE="flat";
+
+function go(n){
+  for(let i=1;i<=5;i++){ $("p"+i).style.display = i===n?"block":"none";
+    const s=$("s"+i); s.className = i===n?"on":(i<n?"done":""); }
+  if(n===2){ if(!$("sliceform").innerHTML) buildSliceForm();
+             if(HWMODE==="flat" && !$("hwyaml").value.trim()) loadPreset(); }
+  if(n===3 && !$("wlform").innerHTML) buildWorkloadForm();
+  window.scrollTo(0,0);
+}
+function setMode(m){
+  HWMODE=m;
+  $("sliceform").style.display = m==="slice"?"block":"none";
+  $("derived").style.display = m==="slice"?"block":"none";
+  $("flatbox").style.display = m==="flat"?"block":"none";
+  $("mslice").style.borderColor = m==="slice"?"var(--accent)":"var(--line)";
+  $("mflat").style.borderColor = m==="flat"?"var(--accent)":"var(--line)";
+  if(m==="slice") deriveNow();
+}
+function buildSliceForm(){
+  const secs={};
+  SLICE.fields.forEach(f=>{ (secs[f.section]=secs[f.section]||[]).push(f); });
+  $("sliceform").innerHTML = Object.entries(secs).map(([sec,fs])=>`
+    <div class="sec"><h2>${sec}</h2><div class="grid">`+fs.map(f=>{
+      const id="s_"+f.path.replace(/\./g,"__");
+      const opts={"tensor_core.dtype":["bf16","fp16","fp8","nvfp4","fp4","int8"],
+                  "addressing.mode":["interleave","linear"],
+                  "onchip_buffer.contents":["none","ab","abc","abc_kv","abc_kv_moe"]}[f.path];
+      const ctl = opts ? `<select id="${id}" onchange="deriveNow()">${opts.map(o=>`<option${String(f.default)===o?" selected":""}>${o}</option>`).join("")}</select>`
+        : (f.kind==="bool" ? `<select id="${id}" onchange="deriveNow()"><option${f.default?" selected":""}>true</option><option${!f.default?" selected":""}>false</option></select>`
+        : `<input id="${id}" ${f.kind==="int"||f.kind==="float"?'type="number" step="any"':''} value="${f.default}" onchange="deriveNow()">`);
+      return `<div><label title="${f.doc}">${f.path.split(".").slice(-1)[0]}${f.unit?` (${f.unit})`:""}</label>${ctl}</div>`;
+    }).join("")+`</div></div>`).join("");
+}
+function collectSlice(){
+  const cfg={};
+  SLICE.fields.forEach(f=>{
+    const el=$("s_"+f.path.replace(/\./g,"__")); if(!el) return;
+    let v=el.value;
+    if(f.kind==="int") v=parseInt(v||0,10);
+    else if(f.kind==="float") v=parseFloat(v||0);
+    else if(f.kind==="bool") v=v==="true";
+    const parts=f.path.split("."); let node=cfg;
+    parts.slice(0,-1).forEach(p=>{ node=node[p]=node[p]||{}; });
+    node[parts.at(-1)]=v;
+  });
+  return cfg;
+}
+async function deriveNow(){
+  const body={slice_cfg:collectSlice()};
+  try{ body.workload = collectWorkload(); }catch(e){}
+  const r=await fetch(API+"/api/derive",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json();
+  if(j.problems && j.problems.length){ $("derived").innerHTML=`<span class="err">${j.problems.join("\n")}</span>`; return; }
+  const d=j.derived, m=j.memory;
+  $("derived").innerHTML=`<h2>what this config means</h2>
+    <div class="kpis">
+      <div class="kpi"><b>${d.pflops_total.toFixed(2)} PF</b><span>tensor total (dense)</span></div>
+      <div class="kpi"><b>${d.tflops_per_tensor_core.toFixed(1)} TF</b><span>per tensor core</span></div>
+      <div class="kpi"><b>${d.tflops_per_shader_core.toFixed(0)} TF</b><span>per shader core</span></div>
+      <div class="kpi"><b>${d.hbm_TBps.toFixed(2)} TB/s</b><span>HBM (${d.memory_slices} slices)</span></div>
+      <div class="kpi"><b>${d.vector_tflops.toFixed(0)} TF</b><span>vector (wave32)</span></div></div>
+    <div class="scroll"><table><tbody>
+      <tr><td>shader</td><td class="mono">${d.shader_cores} cores · ${d.tensor_cores} tensor cores · MMA ${d.mma_tile} · attention tile ${d.attention_tile}</td></tr>
+      <tr><td>per tensor core</td><td class="mono">SMEM ${d.smem_per_tensor_core_KB.toFixed(0)} KB · GPR ${d.gpr_per_tensor_core_KB.toFixed(0)} KB</td></tr>
+      <tr><td>L1 / L2</td><td class="mono">${d.l1_total_MB.toFixed(2)} MB @ ${d.l1_TBps.toFixed(2)} TB/s  ·  ${d.l2_total_MB.toFixed(0)} MB @ ${d.l2_TBps.toFixed(2)} TB/s</td></tr>
+      <tr><td>on-chip buffer</td><td class="mono">${d.buffer_MB.toFixed(0)} MB @ ${d.buffer_TBps.toFixed(2)} TB/s (${d.buffer_MB_per_slice.toFixed(1)} MB per slice) — ${d.buffer_contents}</td></tr>
+      <tr><td>switch (slice ↔ buffer)</td><td class="mono">${d.switch_TBps.toFixed(2)} TB/s aggregate · ${d.switch_TBps_per_slice.toFixed(2)} TB/s per slice</td></tr>
+      <tr><td>gmem</td><td class="mono">downstream r/w ${d.downstream_read_TBps.toFixed(2)}/${d.downstream_write_TBps.toFixed(2)} TB/s · upstream r/w ${d.upstream_read_TBps.toFixed(2)}/${d.upstream_write_TBps.toFixed(2)} TB/s</td></tr>
+      <tr><td>HBM / addressing</td><td class="mono">${d.hbm_capacity_GB.toFixed(0)} GB · ${d.addressing}</td></tr>
+      ${m?`<tr><td>workload memory</td><td class="mono">weights ${m.weights_GB.toFixed(2)} GB (experts ${m.expert_weights_GB.toFixed(2)}) + KV ${m.kv_cache_GB.toFixed(2)} GB = ${m.total_GB.toFixed(2)} GB of ${d.hbm_capacity_GB.toFixed(0)} GB · ${m.sparsity}</td></tr>`:""}
+    </tbody></table></div>
+    <div class="scroll" style="margin-top:10px">${j.arch_svg||""}</div>`;
+}
+async function init(){
+  OPTS=await (await fetch(API+"/api/options")).json();
+  SCHEMA=await (await fetch(API+"/api/schema")).json();
+  SLICE=await (await fetch(API+"/api/slice_schema")).json();
+  $("gpucards").innerHTML = OPTS.hardware.map(h=>
+    `<div class="card${h===GPU?' sel':''}" data-hw="${h}" onclick="pick('${h}')">
+       <b>${h.toUpperCase()}</b><span id="d_${h}">…</span></div>`).join("") +
+    `<div class="card" data-hw="custom" onclick="pick('custom')"><b>Custom GPU</b>
+      <span>start from any preset and edit every field in step 2</span></div>`;
+  OPTS.hardware.forEach(async h=>{
+    const r=await fetch(API+"/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({mode:"kernel",config:{hw:h,kernel:{kernel:"gemm",M:64,N:64,K:64,tile:'{"bm":64,"bn":64,"bk":64}'}}})});
+    const {job_id}=await r.json();
+    let j; do{ await new Promise(s=>setTimeout(s,120)); j=await (await fetch(API+"/api/jobs/"+job_id)).json(); }while(j.state==="running");
+    const el=$("d_"+h); if(el&&j.result) el.textContent=`${j.result.sms} SMs · engine ${j.result.backend}`;
+  });
+}
+function pick(h){ GPU = h==="custom" ? GPU : h; CUSTOM = h==="custom";
+  document.querySelectorAll(".card").forEach(c=>c.classList.toggle("sel", c.dataset.hw===h));
+  $("cfgnote").textContent = CUSTOM ? "Custom GPU: edit anything below. Unknown fields and missing required ones are reported by validate."
+    : `Using preset ${GPU}. You can still edit it here — the model only sees this config.`;
+}
+async function loadPreset(){
+  const r=await fetch(API+"/api/hw_yaml?hw="+GPU);
+  if(r.ok) $("hwyaml").value = await r.text();
+}
+async function validateHw(){
+  const r=await fetch(API+"/api/validate_hw",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({yaml:$("hwyaml").value})});
+  const j=await r.json();
+  $("hwmsg").innerHTML = j.problems && j.problems.length
+    ? `<span class="err">${j.problems.join("\n")}</span>` : `<span style="color:var(--ok)">config is valid (${j.fields} fields set)</span>`;
+}
+const WL_DEFAULTS={};
+function buildWorkloadForm(){
+  const secs={};
+  SCHEMA.workload.forEach(f=>{ (secs[f.section]=secs[f.section]||[]).push(f); WL_DEFAULTS[f.path]=f.default; });
+  $("wlform").innerHTML = Object.entries(secs).map(([sec,fs])=>`
+    <div class="sec"><h2>${sec}</h2><div class="grid">` + fs.map(f=>{
+      const id="w_"+f.path.replace(/\./g,"__");
+      const opts={"attention.type":["mla","gqa","mha"],"attention.impl":["flash","naive"],
+        "attention.absorb":["auto","true","false"],"ffn.type":["moe","mlp","none"],
+        "run.phase":["decode","prefill"],
+        "dtypes.weight":["fp8","int4","nvfp4","fp4","int8","bf16","fp16"],
+        "dtypes.expert":["fp8","nvfp4","fp4","int4","int8","bf16"],
+        "dtypes.activation":["bf16","fp16","fp8"],"dtypes.kv":["bf16","fp8","fp16"],
+        "dtypes.compute":["fp8","nvfp4","fp4","int8","bf16","fp16","fp32"],
+        "dtypes.attn_compute":["bf16","fp16","fp8"]}[f.path];
+      const ctl = opts ? `<select id="${id}">${opts.map(o=>`<option${String(f.default)===o?" selected":""}>${o}</option>`).join("")}</select>`
+        : (f.kind==="bool" ? `<select id="${id}"><option${f.default?" selected":""}>true</option><option${!f.default?" selected":""}>false</option></select>`
+        : `<input id="${id}" ${f.kind==="int"?'type="number"':''} value="${f.default}">`);
+      return `<div><label title="${f.doc}">${f.path.split(".").pop()}${f.unit?` (${f.unit})`:""}</label>${ctl}</div>`;
+    }).join("") + `</div></div>`).join("");
+}
+function collectWorkload(){
+  const wl={};
+  SCHEMA.workload.forEach(f=>{
+    const el=$("w_"+f.path.replace(/\./g,"__")); if(!el) return;
+    let v=el.value;
+    if(f.kind==="int") v=parseInt(v||0,10);
+    else if(f.kind==="bool") v = v==="true";
+    const parts=f.path.split("."); let node=wl;
+    parts.slice(0,-1).forEach(p=>{ node=node[p]=node[p]||{}; });
+    node[parts.at(-1)]=v;
+  });
+  return wl;
+}
+async function run(){
+  go(4); $("log").textContent=""; $("fill").style.width="2%";
+  const cfg={hw:GPU, workload:collectWorkload()};
+  if($("cmpattn")?.checked) cfg.compare_attention=true;
+  if(HWMODE==="slice") cfg.slice_cfg=collectSlice();
+  else { const y=$("hwyaml").value.trim(); if(y) cfg.hw_yaml=y; }
+  const t0=performance.now();
+  try{
+    const r=await fetch(API+"/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({mode:"workload",config:cfg})});
+    const {job_id}=await r.json(); JOB=job_id;
+    let j;
+    do{
+      await new Promise(s=>setTimeout(s,200));
+      j=await (await fetch(API+"/api/jobs/"+job_id)).json();
+      const frac=j.total?Math.min(0.98,j.done/j.total):0.05;
+      $("fill").style.width=(100*Math.max(0.02,frac)).toFixed(1)+"%";
+      $("plabel").textContent=`${j.done}/${j.total} · ${j.where||""} · ${((performance.now()-t0)/1000).toFixed(1)}s`;
+      $("log").textContent=(j.log||[]).join("\n"); $("log").scrollTop=1e6;
+    }while(j.state==="running");
+    $("fill").style.width="100%";
+    if(j.state==="error"){ $("log").innerHTML=`<span class="err">${j.error}\n\n${j.trace||""}</span>`; return; }
+    showResults(j.result,(performance.now()-t0)/1000); go(5);
+  }catch(e){ $("log").innerHTML=`<span class="err">${e}</span>`; }
+}
+function bars(list,total){ return list.map(x=>`<tr><td class="mono">${x.name}</td>
+  <td class="num">${(100*x.share).toFixed(1)}%</td></tr>`).join(""); }
+function showResults(r,secs){
+  const m=r.memory;
+  $("results").innerHTML=`
+  <div class="kpis">
+    <div class="kpi"><b>${r.step_ms.toFixed(2)} ms</b><span>per layer stack</span></div>
+    <div class="kpi"><b>${m.total_GB.toFixed(1)} GB</b><span>memory / GPU</span></div>
+    <div class="kpi"><b>${r.bounds.by_resource[0]?.name||"—"}</b><span>top bound</span></div>
+    <div class="kpi"><b>${secs.toFixed(1)} s</b><span>compute time</span></div></div>
+  <div class="row" style="margin:0 0 14px">
+    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB)">trace Excel (per cycle, grouped by unit)</button>
+    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB+'&full=1')">Excel · whole kernel</button>
+    <button class="ghost" onclick="window.open(API+'/api/csv?job='+JOB)">CSV</button>
+    <button class="ghost" onclick="window.open(API+'/api/pdf?job='+JOB)">PDF report</button>
+  </div>
+  ${r.by_block?`<div class="sec"><h2>the model's three blocks</h2>
+    <div class="kpis">${Object.entries(r.by_block).map(([k,v])=>
+      `<div class="kpi"><b>${(100*v).toFixed(0)}%</b><span>${k.replace(/_/g," ")} — of the critical time</span></div>`).join("")}</div>
+    ${r.activity_by_block?`<div class="hint">activity (busy, bottleneck or not): ${
+      Object.entries(r.activity_by_block).map(([k,v])=>`${k.replace(/_/g," ")} ${(100*v).toFixed(0)}%`).join(" · ")}</div>`:""}</div>`:""}
+  ${r.attn_compare?`<div class="sec"><h2>flash attention on / off</h2>
+    <div class="scroll"><table><thead><tr><th></th><th class="num">step</th><th class="num">attention</th>
+    <th class="num">activations</th><th>top bound</th></tr></thead><tbody>
+    ${["flash","naive"].map(k=>`<tr><td>${k}</td><td class="num">${r.attn_compare[k].step_ms.toFixed(2)} ms</td>
+      <td class="num">${r.attn_compare[k].attention_ms.toFixed(2)} ms</td>
+      <td class="num">${r.attn_compare[k].activations_GB.toFixed(2)} GB</td>
+      <td class="mono">${r.attn_compare[k].top_bound}</td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="hint">flash is ${r.attn_compare.speedup_of_flash.toFixed(2)}x faster here and saves
+      ${r.attn_compare.extra_activation_GB_without_flash.toFixed(1)} GB of activations.</div></div>`:""}
+  <h2>GPU architecture (as configured)</h2>
+  <div class="scroll">${r.arch_svg||""}</div>
+  <div class="sec"><h2>where the time goes</h2>
+    <div class="scroll"><table><thead><tr><th>by resource</th><th class="num">share</th></tr></thead>
+    <tbody>${bars(r.bounds.by_resource)}</tbody></table></div></div>
+  <div class="sec"><h2>by resource and tensor</h2>
+    <div class="scroll"><table><thead><tr><th>resource:tensor</th><th class="num">share</th></tr></thead>
+    <tbody>${bars(r.bounds.by_tensor.slice(0,10))}</tbody></table></div></div>
+  <div class="sec"><h2>operators</h2><div class="scroll"><table>
+    <thead><tr><th>op</th><th class="num">x</th><th>tile</th><th class="num">time</th>
+    <th class="num">share</th><th>occupancy</th><th>bound</th></tr></thead><tbody>
+    ${r.ops.slice(0,25).map(o=>`<tr><td class="mono">${o.name}</td><td class="num">${o.repeat}</td>
+      <td class="mono">${o.tile}</td><td class="num">${o.time_us.toFixed(1)} µs</td>
+      <td class="num">${(100*o.share).toFixed(1)}%</td><td class="mono">${o.occupancy}</td>
+      <td class="mono">${o.bound}</td></tr>`).join("")}</tbody></table></div></div>
+  <details class="sec"><summary>text report</summary><pre class="mono">${r.summary}</pre></details>
+  <div class="row"><button class="ghost" onclick="go(3)">change workload</button>
+    <button class="ghost" onclick="go(1)">change GPU</button></div>`;
+}
+init();
+</script>
+</body>
+</html>

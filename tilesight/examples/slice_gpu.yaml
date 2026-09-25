@@ -1,0 +1,47 @@
+# A GPU described the way an architect configures one: slices, not a datasheet.
+name: demo-slice-gpu
+core:
+  freq_ghz: 2.0
+  wave32_per_core: 4            # SIMD is wave32; 4 of them per shader core
+  tensor_cores: 4               # tensor cores inside one shader core
+  resident_waves_per_simd: 8
+tensor_core:
+  tile_m: 64
+  tile_n: 64
+  tile_k: 32
+  tile_latency_cycles: 16       # cycles for one MMA tile
+  dtype: bf16                   # all tensors use the KQV datatype
+attention_tile: {m: 64, n: 64}
+shader_core:
+  shared_mem_KB: 228
+  shared_mem_shared_by_tc: true # false = split evenly between the tensor cores
+  gpr_KB: 256
+  gpr_shared_by_tc: true
+shader_slice:
+  cores_per_slice: 8            # these cores share the slice's L1
+  count: 20                     # slices are copies; the model staggers them in time
+  l1_KB: 256
+  l1_latency_cycles: 20
+  l1_bytes_per_clk: 128
+memory_slice:
+  count: 8                      # each owns one HBM channel + one L2 port + one DMA port
+  l2_MB: 16                     # 0 = no L2; ports and DMA talk straight to the on-chip buffer
+  l2_bytes_per_clk: 512
+  l2_latency_cycles: 200
+  hbm_GB: 24
+  hbm_latency_cycles: 1200
+  dma_ports: 1
+addressing:
+  mode: interleave              # linear | interleave
+  interleave_KB: 1              # 1, 4, ... whatever the design uses
+onchip_buffer:
+  capacity_MB: 256              # logically unified, physically one piece per slice
+  bytes_per_clk: 4096
+  latency_cycles: 60
+  contents: ab                  # none | ab | abc | abc_kv | abc_kv_moe
+gmem:
+  hbm_GBps_per_slice: 1000
+  upstream_read_GBps: 0         # 0 = derive from the L1/L2 port widths
+  downstream_read_GBps: 0
+network: {domain_size: 8, bandwidth_GBps: 900}
+runtime: {launch_overhead_us: 2.0}

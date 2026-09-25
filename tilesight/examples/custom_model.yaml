@@ -1,0 +1,24 @@
+# Hand-written model: give the size of every layer group yourself.
+# (This is exactly what `tilesight dump-model --model kimi_k2.hf` produces; edit freely.)
+name: my-moe
+hidden: 7168
+vocab: 163840
+layers:
+  - name: dense
+    repeat: 1
+    blocks:
+      - {type: norm}
+      - {type: mla, heads: 64, q_lora_rank: 1536, kv_lora_rank: 512, qk_nope: 128, qk_rope: 64, v_head: 128}
+      - {type: norm}
+      - {type: mlp, d_ff: 18432}
+  - name: moe
+    repeat: 60
+    blocks:
+      - {type: norm}
+      - {type: mla, heads: 64, q_lora_rank: 1536, kv_lora_rank: 512, qk_nope: 128, qk_rope: 64, v_head: 128}
+      - {type: norm}
+      - {type: moe, experts: 384, topk: 8, d_ff: 2048, shared_experts: 1}
+  - name: extra_proj           # raw ops are allowed too
+    repeat: 1
+    blocks:
+      - {type: gemm, name: mtp_proj, N: 7168, K: 14336, shard: none}

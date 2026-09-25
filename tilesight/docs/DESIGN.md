@@ -1,0 +1,506 @@
+# DESIGN — equations, semantics, deviations
+
+## 0. The interface: GPU config in, model behind it
+A GPU is **input**, not part of the model. `python/tilesight/hw/schema.py` declares every field
+the model may see — 99 fields in 15 sections, each with a type, unit, default, and a tag:
+`spec` (copy it from the vendor), `calib` (measure it), `policy` (a modelling choice) or `loss`
+(a derating knob, default always no loss). The reference is generated from it:
+`docs/CONFIG.md`, or `tilesight config --list [--section … --tag …] [--md f.md] [--csv f.csv]`.
+
+Three rules keep the boundary clean, and a test enforces all three:
+1. the model asks `HardwareSpec.get(path)` and never carries a literal default — absent fields
+   resolve to the schema default, so hardware knowledge lives in exactly one file;
+2. no file under `engine/`, `kernels/` or `model/` may name a device, vendor or architecture
+   (`b300`, `hopper`, `cdna` …) outside comments;
+3. every shipped preset must pass `HardwareSpec.validate()` (unknown field, wrong type, missing
+   required field), which is also what `tilesight config --validate <file>` runs for a new part.
+
+Adding a GPU therefore means writing a YAML and nothing else; adding a hardware *concept* means
+adding a field to the schema and using it in the model.
+
+## 1. Layers
+```
+ModelSpec (blocks: mla/gqa/mlp/moe/norm/raw)      model/spec.py      <- user gives layer sizes / HF config
+   │  RunConfig (phase, batch, seq, tp/dp/ep, dtypes)
+   ▼
+Ops for one GPU (gemm, attn_decode, attn_prefill, elementwise, allreduce, a2a)   model/lower.py
+   │  tile policy (GPU config, hw/schema.py's compute.tile_policy.*):
+   │  fixed | per-op override (fnmatch) | auto search (kernels/tiles.py)
+   ▼
+Kernels = tile execution plans lowered to numbers (ir/kernel.py)   kernels/*.py
+   │  HardwareSpec -> lanes
+   ▼
+Engine (reference.py == C++ core) -> KernelResult (time, limiter, util)
+   ▼
+ModelReport: step time, tok/s/GPU, per-op table, limiter mix, memory   model/runner.py
+DSE: sweep / required_value over any hardware field                      dse/sweep.py
+```
+
+## 2. Hardware → resource lanes (paper Eq. 1, generalized)
+The paper's fixed vector ⟨TC, CUDA, SFU, TMEM, SMEM, L1.5, L2, DDR, Net⟩ becomes a
+**named, data-driven lane list** built from the YAML:
+
+| lane | source | work unit in Action.work | rate |
+|---|---|---|---|
+| `tc` | compute.tc_dense_tflops[dtype] | seconds on one SM | peak·eff/SMs |
+| `cuda` | compute.cuda_fp32_tflops | seconds on one SM | |
+| `sfu` | compute.sfu_tops | seconds on one SM | |
+| `<onchip>` (smem, tmem, …) | memory.onchip.* | seconds on one SM | bytes/clk or TB/s per SM |
+| `path:<p>` (tma, lsu, …) | load_paths.* | seconds on one SM | per_sm_GBps |
+| `l2` | memory.l2 | **bytes** | min(BW·eff / active_SMs, per_sm_max) |
+| `ddr` | memory.ddr | **bytes** | min(BW·eff / active_SMs, per_sm_max) |
+
+Shared lanes model the paper's observation that a partially filled wave gives each
+active SM a larger share of L2/DDR bandwidth, bounded by what one SM can pull
+(`per_sm_max_GBps`, a calibration target). Net is handled by comm kernels (§5.4).
+
+### 2b. Datatypes
+`DTYPE_BYTES` gives storage width; `DTYPE_ALIAS` maps a name to the tensor-core datapath it runs on
+(nvfp4/mxfp4 → fp4, mxfp8 → fp8); `WEIGHT_ONLY` (int4) means the weights are narrow but the MMA runs
+at the activation width. `HardwareSpec.tc_datapath` widens to the next datapath a part actually has
+(fp4 → fp8 on Hopper/CDNA3); `mma_cost` returns the `cuda` lane when there is no tensor-core path at
+all (fp32). Capability flags gate tile features: `compute.cta_pair` (2-CTA MMA),
+`compute.cluster_multicast` (thread-block clusters + TMA multicast; false on AMD),
+`load_paths_default` (a request for `tma` resolves to the part's real path, e.g. CDNA5 `tdm`).
+
+## 3. Engine (paper §3.3–3.4, Eqs. 2–5; Algorithms 1–2)
+For a kernel with `num_blocks`, `iters`, `stages`, `resident`, `consumers` and action
+lists `prologue`, `body` (one K-loop iteration), `epilogue`:
+
+**Waves.** `conc = SMs·resident`; `full, tail = divmod(num_blocks, conc)`. For a wave of
+`b` blocks: `active = min(SMs, ⌈b/resident⌉)`, `bps = ⌈b/active⌉`.
+
+**Per-action lane time.** `u_r(o) = work_r(o)` (per-SM lane) or `work_r(o)/share_r(active)`
+(shared lane). Node weight `w(o) = max_r u_r(o) + latency(o)`.
+
+**Steady round (Eq. 4').**
+```
+R = max( bps · max_r Σ_o u_r(o)            # contention: same-lane work serializes (paper Eq. 4)
+         CP / stages,                       # SMEM-buffer recycling recurrence
+         CPrec / consumers )                # loop-carried compute recurrence
+CP    = longest path over the body DAG with weights w(o)
+CPrec = longest path using only actions flagged `recurrent`
+```
+Limiter label = the lane attaining the first term, else `latency`.
+
+**Wave time (Eq. 2').** `T = T_pro + T_fill + iters·R + T_epi`, with
+`T_fill = max(0, CP − R)` (first iteration's exposed latency) and
+`T_pro/T_epi = max(bps·max_r Σ u_r, longest path)` over the prologue/epilogue lists.
+Kernel time = Σ_waves count·T + launch overhead.
+
+**Utilization.** busy fraction per lane = total work of all blocks / (machine rate × time).
+
+**Bound attribution (coarse + fine).** Every phase's time is charged to a limiter:
+- coarse (`limiter_time`): lane name | `latency` | `launch` | `net`
+- fine (`limiter_detail`):
+  - resource-bound → `"<lane>:<action>"`, action = the one putting most work on that lane,
+    e.g. `ddr:load:expert_weight`, `l2:load:act`, `smem:mma`, `tc:gemm_qk`, `sfu:softmax`
+  - latency-bound → `"latency:<action>(<lane>|mem-lat)"`, action = heaviest node on the
+    critical path of whichever recurrence set the bound (CP/stages or CPrec/consumers),
+    lane = that node's dominant lane or `mem-lat` if its memory latency dominates
+  - `latency:fill`, `launch`, `net:<algo>`
+Action names carry the **tensor** (`load:weight`, `load:kv_cache(K)`, `load:scores(S)`,
+`store:partials`, `spill:regs` …), set by the lowering from `names=(A,B,C)`.
+Reports roll details up into resource classes (compute:tensor-core / cuda-core / sfu,
+on-chip:smem / tmem / regs(spill), cache:L2, memory:DDR/HBM, load-path:*, interconnect,
+latency<-x, launch-overhead) and list the top resource:tensor pairs.
+
+**Deviations from the paper (documented, switchable later — TASKS A1/A2):**
+- Paper Eq. 5 minimizes over topological orders of the action DAG. We use a
+  recurrence-based bound (CP/stages, CPrec/consumers) that is order-free; exact
+  order enumeration is task A1 (needed for fused kernels with several independent
+  chains, e.g. the paper's MLA-decode example with 132 legal orders).
+- Paper Eq. 2 uses `N−d` steady iterations with `d = stages·resident−1`; we use all
+  `iters` and an explicit fill term. This avoids the double-count the paper's reviewers
+  suspected as the source of its deep-K bias. Task A2 adds the paper form behind a flag.
+
+## 4. L2 model — deterministic tile-level simulation (default) or SDCM
+The paper's SDCM answers "how likely is a hit at this reuse distance". For a hardware-managed
+L2 that is the wrong question: what is resident is decidable, so `engine/cache_sim.py` decides
+it. The tile is the atom (no cache lines). `memory.l2.partitions` independent partitions each
+hold whole tiles and run an explicit policy (`memory.l2.policy`: `lru` | `fifo` | `mru`); a tile
+goes to the partition **its address maps to** (`report.addressing.AddressMap`), so the layout /
+swizzle decides the balance and a power-of-two pitch really does pile everything into one
+partition. Capacity is in bytes, so different tile sizes compete honestly. The simulation
+replays `memory.l2.waves_simulated` waves (default 2), which is how cross-wave reuse became
+visible (the old one-wave window counted every re-read as a miss).
+
+Output is not just a miss fraction: `SimResult` gives per-partition residency (exactly which
+tiles are still in L2), occupancy and eviction counts — printed by `tilesight kernel` and shown
+in the Figure 3(f) panel. Example (B300, 4096³ FP8 GEMM): 93.8% hit; with the default
+interleave every resident tile lands in partition 0, with `mode: hash` they spread 40/40/40/40.
+Shrinking the effective L2 from 83 MB to 1 MB produces 208 evictions and drops the hit rate.
+
+**Losses are configured, and off by default.** Every cache level takes `capacity_derate`, and
+every preset ships it at **1.0**: out of the box the simulation may use the full physical
+capacity, so nothing is silently taken away. Lower it only with a measurement behind it — it is
+the one knob that absorbs what the tile-level simulation does not model (cache-line
+granularity, conflicts inside a partition, other kernels' traffic, streaming/evict-first
+hints). `effective_capacity_MB` is an outright override for when a bandwidth-vs-working-set
+sweep gives the cliff directly (TileSight measured ~83 MB on B200-class parts, i.e. ~0.66 of
+the 126 MB physical; that value now lives in a comment, not in the defaults).
+The same rule holds for the other loss knobs: `efficiency.*` defaults to 1.0 when absent,
+`memory.queueing.coef` to 0, and `HardwareSpec.lossless()` (CLI `--ideal`) switches all of them
+off at once — efficiency factors, derates, queueing, per-SM caps and outstanding-request
+ceilings — which gives the theoretical-peak baseline. On B300 the modelled losses account for
+1.14x on a big FP8 GEMM, 1.24x on a decode GEMM and 1.26x on Kimi-K2 decode (35.5 vs 28.2 ms).
+
+**L1 is modeled the same way.** `memory.l1`: `owner` (`sm` | `cluster` — a Hopper/Blackwell
+cluster shares its L1s through DSMEM, so the usable capacity is multiplied by `cluster_size`),
+`capacity_KB`, `smem_carveout_KB` (what the tile plan already takes as scratchpad; only the
+rest caches global loads), `cache_global_loads`, `capacity_derate`, `bytes_per_clk`,
+`latency_cycles`, `policy`. B300: (256 - 228) x 0.75 x 2 = 42 KB usable. L1 is simulated over
+**one SM's slice of the wave** (it is private, unlike L2) and only for paths that actually go
+through it — a DMA engine writing SMEM/LDS directly never touches it, which the `smem_direct`
+path attribute decides. An L1 hit does not reach the L2 datapath: a 1024x1024x512 BF16 GEMM on
+the LSU path gets 37%/12% hit and its L2 traffic drops from 16 to 12 KB, while the same GEMM on
+TMA bypasses L1 entirely. There is an `l1` lane for its bandwidth.
+
+**The on-chip buffer is not a cache**: it is explicitly managed, so its residency is a
+deterministic capacity share per tensor class (`resident_frac`), never a probability.
+
+The SDCM path below is kept for comparison (`memory.l2.model: sdcm`) and is still what
+`engine/cache.py` implements.
+
+## 4b. SDCM (paper §3.5, Eqs. 6–10)
+Each lowering emits the tile access sequence of the **first wave** for up to 4 sampled
+K-steps, in issue order (blocks progress in lock-step, swizzled raster order). Keys
+encode (tensor, reuse coordinates) exactly as Eq. 6 (reuse dims dropped).
+- `D_T` = distinct tiles between consecutive uses of the same tile (Fenwick tree, exact).
+- `P(hit | D_T) = P(X ≤ A−1)`, `X ~ Bin(D_T, A/B_T)`, A = assoc, B_T = effective capacity
+  / avg tile bytes. Exact binomial for D_T ≤ 256, else Gaussian with Zelen–Severo Φ and
+  a +0.5 continuity correction (deviation: the paper writes 1−Q(|A−1−μ|/σ)).
+- Compulsory first touches miss. Miss ratio per stream sets `ddr` bytes of each load;
+  all load bytes go through `l2`.
+- Load latency = path issue latency + hit·L2 latency + miss·DDR latency.
+Not yet: cross-wave reuse (B1), L1.5 / per-die cascade (B2), D_T perturbation (A6).
+
+## 5. Kernel lowerings
+### 5.1 GEMM (`kernels/gemm.py`)
+`C[b] = A[b]·B[b]`, grid `batch·⌈M/bm⌉·⌈N/bn⌉·split_k`, `iters = ⌈⌈K/bk⌉/split_k⌉`.
+- stages: explicit or max fitting SMEM (≤8); resident = min over max_blocks, SMEM, threads,
+  registers (GPR), TMEM; the report shows `resident/limiter`, all binding resources joined
+  with `+` (e.g. `1/smem+regs`).
+- **Registers (GPR)**: regs/thread = 40 base + fp32 accumulator spread over consumer
+  threads (no-TMEM parts) or +16 epilogue regs (TMEM parts). Above
+  `occupancy.max_regs_per_thread` the excess spills: `spill:regs` action charges
+  2×spilled bytes per block to the L2 lane (spread over iterations).
+- body: `load_A`, `load_B` (TMA/LSU/split paths), `mma` (tc time with M padded to
+  `tc_min_m`; smem operand reads). Cluster multicast `cluster_m` divides B's L2 traffic;
+  `cta_pair` (2-CTA MMA, capability `compute.cta_pair`) also halves B's SMEM footprint/reads.
+- epilogue: TMEM accumulator read + convert, store C (fp32 partials if split-K, followed
+  by a reduce kernel).
+- low-precision datapath ⇒ activations are quantized to it (quant kernel cost: TASK E5).
+### 5.2 Attention (`kernels/attention.py`)
+- decode: block = (batch, kv_head, head-group of ≤block_m heads, kv-split); per KV tile:
+  load K(/V) → gemm_qk → softmax (SFU exp + CUDA + TMEM S/P traffic) → gemm_pv;
+  qk/softmax/pv are `recurrent`; `consumers` ping-pong warpgroups hide the chain.
+  MLA absorbed: `d_qk = kv_lora+rope`, `d_v = kv_lora`, one kv head, `v_in_k`.
+  auto split-KV fills the machine; a combine kernel follows.
+- prefill: causal FA-style; iterations averaged over q-tiles (per-block iters: TASK A3).
+### 5.2b Attention families and implementations (`model/attention_blocks.py`)
+Three block types, all with `impl: flash | naive` (default `RunConfig.attn_impl`),
+`causal`, `sliding_window`:
+
+| block | shape fields | KV cache / token / layer (one GPU) | core |
+|---|---|---|---|
+| `mha` | heads, head_dim [, v_head_dim] | `heads/tp · (hd+vd) · kv_bytes` | H=KVH |
+| `gqa` | heads, kv_heads, head_dim (kv_heads=1 → MQA) | `max(1,kv_heads/tp) · (hd+vd) · kv_bytes` | H/KVH query heads per KV head |
+| `mla` | q_lora_rank, kv_lora_rank, qk_nope, qk_rope, v_head | `(kv_lora+rope) · kv_bytes` (replicated over tp) | absorbed: 1 latent KV head, d_qk=kv_lora+rope, d_v=kv_lora; expanded: MHA with d_qk=nope+rope, d_v=v_head |
+
+Extra mha/gqa options: `fused_qkv`, `qk_norm`, `rope_dim`; MLA: `absorb: auto|true|false`.
+
+**flash** → one fused kernel (§5.2): S/P never leave the SM; causal and sliding-window
+tiles are skipped (per-q-tile iteration counts; average used until TASK A3).
+
+**naive** → three ops, each a normal kernel lowering:
+```
+attn_scores : GEMM  M=(H/KVH)·Sq, N=Skv, K=d_qk, batch=B·KVH, out=attn_scores_dtype (fp32)
+attn_softmax: elementwise  read S (fp32), write P (act dtype), 1 exp + ~5 flops / element
+attn_pv     : GEMM  M=(H/KVH)·Sq, N=d_v, K=Skv, batch=B·KVH
+```
+Query heads sharing a KV head are folded into M so K/V are read once per KV head (the
+GEMM's L2 model keys operands by batch index). Causal masking does not skip work.
+S and P are counted as live activations → long-context naive prefill shows up as
+activation-memory OVERFLOW and a `ddr`-bound softmax.
+
+### 5.3 Elementwise
+bytes in/out + CUDA flops + SFU ops, 32 KB chunks per block, LSU path.
+### 5.4 Collectives (`kernels/comm.py`, Eq. 11)
+Flat inside the fast domain, **hierarchical** beyond it: a group larger than
+`network.nvlink.domain_size` reduce-scatters inside each node, all-reduces the 1/d shards
+between nodes and all-gathers inside the node again; all-to-all only sends the
+`(group-d)/group` fraction over the slow fabric. Modelling it flat overestimated a 16-GPU
+all-reduce by ~5x (5040 µs vs 868 µs on B300 with 256 MB).
+allreduce: min(ring `2(p−1)α + 2(p−1)/p·S/β`, recursive doubling `⌈log2 p⌉(α+S/β)`).
+all-to-all: `⌈log2 p⌉α + S·(p−1)/p/β`. NVLink inside `domain_size`, scale-out NIC beyond.
+`RunConfig.comm_overlap` hides a fraction (placeholder for a real overlap scheduler, E2).
+
+## 6. Model layer semantics (`model/lower.py`)
+- Attention: `dp` groups of `tp` GPUs; heads split by tp; tokens per attention rank
+  `T = batch/dp` (decode) or `batch/dp·seq` (prefill). MLA latent KV is replicated across
+  tp ranks (not head-sharded).
+- MLA: decode uses weight absorption (W_UK/W_UV as per-head batched GEMMs, attention
+  over the 576-dim latent); prefill uses the non-absorbed path (kv_b up-projection, MHA
+  with d_qk=192, d_v=128). Override with `RunConfig.mla_absorb`.
+- Dense MLP / shared expert: column+row split by tp, all-reduce over tp.
+- MoE: EP over `ep` GPUs (default all). Unique tokens per GPU `Tu = T/tp`. Pairs landing
+  in the EP group `Tu·ep·k`; P(expert active) = `1−(1−k/E)^(Tu·ep)`; active local experts
+  `E/ep·P`; tokens per active expert `Tu·ep·k/E/P`. Grouped GEMM batch = active experts —
+  this is what makes small-batch decode stream (almost) all expert weights. Uniform
+  routing is assumed (skew: TASK E7).
+- lm_head: vocab/tp, only the last token per sequence.
+
+## 7. Memory model (`model/memory.py`)
+weights (per-op resident bytes × repeat, with sharding) + KV cache (per family, see §5.2b;
+sliding-window layers store only `min(seq, window)` tokens) × seqs/rank + 2× peak live
+activation + runtime reserve (4 GB, calib). Reports fit/overflow and max seqs per rank.
+
+## 7b. Request-level runs (`model/request.py`)
+Config: `prompt_len` (P), `output_len` (O), `page_size`, `kv_reserve: peak|current`,
+`decode_samples`, `prefill_batch`.
+- TTFT = prefill step over P tokens (`prefill_batch` sequences).
+- Decode step t has KV length P+t. The full model is evaluated at `decode_samples`
+  values of t in [1, O]; TPOT(t) is integrated with the trapezoid rule
+  (avg TPOT = Σ/O; attention cost is linear in KV length, weights constant).
+- E2E = TTFT + O·avg TPOT.
+- KV per request at step t = kv_bytes_per_seq(ceil((P+t)/page)·page) (sliding-window
+  layers capped at the window). Peak KV = at t=O. Peak total = weights + peak KV +
+  max(prefill act, decode act) + reserve (conservative).
+- max concurrent requests/rank = free HBM / per-request KV (peak: P+O; current: P+O/2).
+
+## 7c. Timeline view (`report/timeline.py`) — the paper's Figure 3(e)
+The engine says how long a round is and what bounds it; `steady_timeline` reconstructs a
+concrete schedule consistent with that, to render (SVG in the web UI, ASCII in the CLI):
+actions are walked in topological order and start when their dependencies are done and
+every lane they need is free; an action holds lane r for u_r and ends at max_r u_r + latency.
+With `stages > 1` a load edge does not constrain the round (the consumer reads a buffer
+filled stages-1 rounds earlier), which is exactly the load/compute overlap Figure 3(e)
+draws; loads are therefore labelled with iteration i+stages-1. Reported alongside:
+`round_s` (what the model uses), `makespan_s` (this schedule's length), the resource and
+dependency bounds, and prologue/epilogue lengths. The picture is a rendering of the model,
+not a second model: `tests/test_request_and_bounds.py` pins it to the engine's numbers.
+
+Units: every event carries seconds and **cycles** (`clock_hz` from the hardware YAML), so
+`timeline_text(tl, unit="cyc")` and the UI toggle show the same schedule in either unit.
+`trace_text` writes the full text trace: header (hardware, clock, grid → waves, schedule,
+round with both bounds, kernel time), one row per action event (phase, round, iteration,
+start/duration in ns and cycles, per-lane occupancy), both gantts, and per-lane occupancy
+of one round. CLI: `tilesight kernel ... --unit cyc --trace-out trace.txt`; the web UI has
+a "download trace (.txt)" button.
+
+**Per-cycle CSV.** `cycle_csv(tl, full=)` emits one row per GPU cycle and one column per
+hardware unit: `cycle, time_ns, phase, round, <lane>…, <lane>_busy…` where `<lane>` is the
+action occupying that unit in that cycle (empty when idle) and `<lane>_busy` is the fraction
+of the cycle it is busy. A unit is modeled as occupied contiguously from the action's start,
+so a 37 ns DDR share of a 162 ns round shows as ~70 busy cycles followed by idle ones.
+`full=False` covers the drawn rounds, `full=True` prologue + every iteration + epilogue.
+CLI `--csv-out FILE [--csv-full]`; web UI: two download buttons (served by `GET /api/csv?job=…`).
+
+**Excel grid.** `report/excel.py` writes the same cycle grid as a workbook: one row per
+cycle, one column per unit, the cell holding the tile that occupies it (`A#7`, `B#7`,
+`MMA#5`) and **coloured by iteration**, so one tile keeps its colour as it moves from
+HBM/L2 to SMEM and, `stages-1` rounds later, into the tensor core. The legend sheet states
+the stagger in rounds, cycles and ns, plus every assumption; the summary sheet has the round
+composition and lane occupancy. CLI `--xlsx-out`, web UI "cycles Excel (coloured)".
+
+**Everything is a cycle count.** Each lane time comes from a closed form and the clock:
+`cycles = round(seconds x clock_hz)`, where seconds is `bytes / bandwidth` for memory lanes
+(bandwidth per SM = min(total/active_SMs, per_sm_cap)), `bytes / (bytes_per_clk x clock)`
+for SMEM/LDS, `flops / (peak x efficiency / SMs)` for the tensor core, `ops / rate` for SFU,
+and a fixed latency term (path issue + hit-weighted L2/HBM latency) added to the node. A tile
+that needs 200 or 500 cycles on a lane simply occupies that many rows in the Excel grid.
+
+**Extra on-chip shared buffer.** `memory.sram` (capacity, bandwidth, latency, assoc) adds a
+level between L2 and HBM and a `sram` lane. Bytes that miss L2 are charged to it, and it
+serves the share of a tensor that stays resident across calls
+(`resident_frac = min(1, capacity / tensor_bytes)`) — which is where a 64 MB A/B staging
+buffer actually pays off: not inside one streaming kernel, but because the next decode step
+re-reads the same weights/KV. See `tests/test_request_and_bounds.py`.
+
+**Using a large on-chip buffer (`dse/buffer.py`).** Once the buffer is a multiple of L2, what
+you put in it matters more than its size. Policies in `memory.sram`:
+`policy: cache|pin` (+ `pin: {weight, kv, act}` shares; a shared cache is split in proportion
+to the classes' footprints so no class double-counts the capacity), `keep_intermediates`
+(elementwise intermediates never reach HBM), `bypass_l2` (resident bytes skip the L2
+datapath, otherwise L2 becomes the next wall), `prefetch` (resident bytes cost no exposed
+memory latency) and `costream` (buffer and HBM serve in parallel, bandwidths add).
+Residency is capacity-share based (`resident_frac`) against the GLOBAL per-class footprint
+that `run_model` installs, because one buffer serves every op.
+
+Two ways to choose the split:
+- `best_alloc` (closed form): pinning x_c bytes of class c removes `T_c·min(1, x_c/F_c)` HBM
+  bytes, so value per byte is `T_c/F_c` (traffic / footprint) and greedy fill by that ratio is
+  exactly optimal *for traffic*. Free — no model re-runs.
+- `optimize_buffer` (search): re-runs the model per split × policy combination, so it captures
+  what the closed form cannot — traffic removed off the critical path is worth nothing, and
+  `bypass_l2`/`prefetch` change which lane binds.
+On Kimi-K2 decode with a 32 GB buffer on B300 the closed form picks act > kv > weight and
+lands at 27.65 ms, while the search finds weight-pinned + bypass_l2 + prefetch at 25.72 ms
+(1.21x over no buffer): KV traffic is real but its attention kernels are latency-bound, so
+removing those bytes buys less than removing expert-weight bytes.
+
+**Per-unit latency.** Every unit has a latency, configurable in cycles (memory levels may use
+ns instead): `compute.mma_latency_cycles` (default 64 — one tile MMA issue-to-result),
+`compute.cuda_latency_cycles`, `compute.sfu_latency_cycles`,
+`memory.onchip.smem.latency_cycles`, `memory.onchip.tmem.latency_cycles`,
+`memory.l2.latency_ns`, `memory.ddr.latency_ns`, `memory.sram.latency_ns`, plus the load
+path's issue overhead. Latency never changes throughput; it lengthens dependency chains.
+Where it lands depends on whether the dependency is loop-carried:
+- **independent work** (a tile MMA, a multi-buffered load): several are in flight, so the
+  latency shows up only in the pipeline **fill**. Raising the MMA latency from 11 to 256
+  cycles moves a B300 FP8 GEMM from 82.5 to 83.1 µs (fill 2.4 → 2.9 µs) and it stays tc-bound.
+- **loop-carried work** (`recurrent`: the online-softmax state, the attention accumulator):
+  the result must land before the next iteration, so the latency divided by `consumers` is a
+  hard floor on the round. At 1024-cycle MMA latency MLA decode flips to `latency`-bound.
+This split is enforced by tests; the engine computes the fill from the full critical path and
+the steady bound from a path where non-recurrent latency is removed.
+
+**L2 blocks, ports and outstanding requests.** `memory.l2` now describes the physical
+structure: `blocks` (independent L2 blocks, each with its own load/store port(s)),
+`ports_per_block`, `bytes_per_clk_per_port`, `line_bytes`, `sector_bytes`. A level can never
+exceed blocks x ports x width x clock, whatever aggregate bandwidth is quoted (on B300 this
+caps the modelled L2 at 17.4 TB/s instead of 20.5). `memory.outstanding.per_sm_lines` is the
+MSHR-style limit on cache lines in flight per SM and gives a Little's-law ceiling
+`BW_per_SM <= lines x line_bytes / latency`, which is why a latency-bound kernel does not
+speed up when HBM gets wider: 64 lines -> 10 GB/s/SM and a 345 µs GEMM, 512 lines ->
+77 GB/s/SM and 83 µs, 2048 lines -> the 180 GB/s per-SM cap and 82.7 µs.
+
+**Where a DMA drops the data.** `memory.dma`: `engines`, `per_l2_block`, and `destination`:
+`smem` (global -> SMEM, the bytes still cross the L2 datapath), `l2` (the engine fills L2 and
+the consumer reads it back — extra L2 write traffic) or `bypass` (engine -> consumer, the L2
+datapath is skipped). Same B300 GEMM: 82.7 / 131.4 / 82.5 µs with L2 occupancy 68% / 84% / 2%.
+
+**L1 ownership.** `memory.l1`: `owner: sm | cluster`, `capacity_KB`, `cluster_size` — Hopper
+and Blackwell share through DSMEM inside a thread-block cluster, AMD keeps a per-CU vector
+cache. Recorded and used for cluster gating today; a separate `l1` lane is TASKS G7.
+
+**Figure 3(d)(e)(f) as an artifact.** `report/figure3.py` renders the paper's three panels as a
+self-contained HTML page (or JSON): (d) the per-action resource vectors, the DAG and the
+envelope with both bounds written out, (e) the timeline over the lanes with the round
+boundaries and the software-pipeline offset, (f) the per-tile report — latency in ns and
+cycles, waves, occupancy and its limiter, lane utilisation, cache hit, overlap rate and the
+time charged to each resource:tensor. CLI: `tilesight kernel … --fig3 fig.html --fig3-json fig.json`.
+
+**DMA vs ordinary loads.** Load paths carry an engine description, not just a bandwidth:
+`engine: dma|lsu`, `smem_direct`, `multicast`, `regs_per_thread`, `issue_bytes_per_clk`.
+A DMA engine (TMA, CDNA5 TDM, `buffer_load→LDS`) issues a descriptor, writes SMEM/LDS
+directly, costs no registers and no SM issue slots, and can multicast to a cluster. An
+ordinary vector load charges the `cuda` lane for address generation, adds a second SMEM
+crossing (register staging), costs `regs_per_thread` that reduce occupancy, and cannot
+multicast — so a `cluster_m > 1` tile is rejected on such a path. On a B300 FP8 GEMM the two
+differ by ~7% in time and far more in which lane binds (LSU: cuda 66%, smem 73%).
+
+**Mega-tile staging.** `memory.sram.stage: {share_blocks: N}` models a panel staged into the
+on-chip buffer by one DMA transfer and consumed by up to N blocks (async copy at panel
+granularity, shared between shaders). B panels are shared by the blocks along M, A panels by
+those along N, so the HBM fraction of that operand is divided by the achievable share.
+
+**Where addresses come from (`model/memmap.py`).** The model layer knows how many layers this
+GPU holds and every matrix shape in them, so addresses are an allocation: walk the ops in
+execution order and hand out 2 MB-aligned regions from a base offset — one per *layer
+instance* weight tensor (61 layers x ~9 tensors = 548 regions, 141.7 GB on Kimi-K2), one per
+attention layer's KV cache, plus double-buffered activations and a workspace. `Region.tile_addr(i, j, bm, bn, layout)`
+then gives the byte address of any tile. `tilesight memmap --model … --base 0x0 [--csv map.csv]`
+prints or exports the map. A standalone kernel study uses `kernel_addr_fn`, which lays out
+A | B | C from a base offset instead.
+
+Addresses flow into every export: the text trace gains `addr / sl / pt` columns, the cycle CSV
+gains `<lane>_addr` columns, and the Excel workbook gains an **addresses** sheet (phase, round,
+iteration, action, tile label with its colour, address, size, L2 slice, HBM port, start cycle).
+Example finding this makes visible: with row-major B tiles of 256 KB and a 2 KB interleave over
+16 slices, every B tile aliases onto slice 0 — a power-of-two stride collapsing onto one slice,
+which is invisible without addresses.
+
+**Address → unit mapping is configuration (`memory.addressing`).** Two independent maps,
+because the L2 side and the memory side are different hardware: `l2` (slices / load ports) and
+`ddr` (HBM ports, what the DMA engines target). Each takes `ports`, `granularity_KB`,
+`addr_bits` (48) and a `mode`:
+`interleave` (port = (addr >> log2 gran) % ports, the usual case), `range` (the address space
+split into equal contiguous ranges) and `hash` (interleave after XOR-folding the higher address
+bits, which breaks power-of-two stride aliasing). `tilesight addrmap --hw b300 [--side l2|ddr]
+[--decode 0x…] [--csv table.csv]` dumps the mapping — which stripes or which range each port
+owns — and decodes individual addresses. Measured effect on one wave of a 4096³ FP8 GEMM
+(B300, 16 slices): 1 KB interleave 1.33x imbalance (75% of peak), 2 KB 2.00x (50%), `hash`
+1.04x (96%), `range` 16x (6%, everything in one range). The mapping feeds the spread analysis
+and the per-event `slice`/`port` columns in the trace, CSV and Excel exports.
+
+**Tile-granularity addressing (`report/addressing.py`).** Tiles get real addresses from a
+layout — `row`, `col`, `swizzle:G`, `xor:B`, `zorder` — and the *set touched together by one
+wave* is spread over L2 slices and HBM ports at `memory.interleave_KB` granularity. A tile is
+not a cache line: it covers several interleave chunks and its bytes are spread over them. The
+report gives per-slice/per-port bytes, an imbalance factor (max/mean) and the implied fraction
+of peak; `with_conflict_penalty` folds that into `efficiency.l2/ddr`. Example (B300, 16 slices,
+8 ports, one wave of a 4096³ FP8 GEMM): row-major A gives 2.00x slice imbalance (50% of peak),
+z-order 1.33x (75%), and 64x64 tiles 3.14x (32%) — smaller tiles cover fewer chunks and spread
+worse. The full set of tile addresses is layout-independent; what a layout changes is which
+tiles are live at the same time, which is why the analysis is over a wave window.
+
+**Trading L2 for buffer (`l2_tradeoff`).** Spend one SRAM budget on a fast L2 or a big slow
+buffer, bandwidth scaling with capacity. At an L2-sized budget (126 MB on B300) shifting
+silicon to the buffer loses — every load still crosses the L2 datapath, so the narrower L2
+becomes the limiter; at 8 GB, moving 90–98% into the buffer wins ~4% on Kimi-K2 decode. The
+buffer has to be large relative to the working set, not just relative to L2.
+
+**Many SMs.** Like the paper (§3.4), one representative SM is modeled and waves are
+aggregated rather than simulating each SM: `WaveDecompose` splits the grid into full waves
+of `SMs x resident` blocks plus a tail wave; resident blocks on an SM are interleaved
+instances of the same pipeline (their lane work is multiplied by `blocks_per_sm`); shared
+lanes (L2/DDR) are divided by the *active* SM count, so a tail wave gives each SM a larger
+share; and cross-SM locality enters through the tile reuse-distance sequence, which is
+generated over the whole wave's block order. The trace header reports the wave split.
+Because every SM in a wave runs the identical pipeline here, the UI never draws N SM rows:
+`machine_timeline` gives a wave-level bar (how many full waves, the tail wave and its active
+SMs, per-wave duration) above the one-SM detail view. Per-SM differences would need a load
+imbalance model (TASKS E7) — until then, N identical rows would carry no extra information.
+
+## 8. DSE (`dse/sweep.py`)
+**Queueing (G12).** A shared lane close to saturation does not only run out of bandwidth, it
+makes every access wait. `memory.queueing.coef` applies an M/D/1-style latency multiplier
+`1 + coef·u/(1-u)`, capped by `max_factor`, where `u` is the busiest shared lane's utilisation
+in that round. Throughput is still bounded by the resource term, so this only moves
+latency-sensitive parts (fill, loop-carried chains): a decode GEMM goes 20.2 → 22.2 µs at
+coef 0.5. Implemented in both engines (parity-tested).
+
+**Overlap scheduler (E2).** `RunConfig.overlap_mode`: `none` (default, every collective
+exposed), `stream` (a collective hides behind the compute that follows it in the same layer),
+`two_batch` (two micro-batches in flight, so it can hide behind the whole layer's compute —
+the DeepEP trick) or `manual` (the old scalar `comm_overlap`). `overlap_efficiency` (0.8)
+says how much of the hideable compute really overlaps. Kimi-K2 decode tp=2: 38.3 ms with
+nothing hidden, 35.9 ms with either overlap mode.
+
+**Linked knobs.** Compute peaks in the YAML are whole-GPU numbers and the engine derives the
+per-SM rate as `peak / sms`, so sweeping `sms` alone keeps total FLOPS constant and makes every
+SM weaker — an audit caught this as a monotonicity violation. `default_links` supplies the
+companion overrides (scale `tc_dense_tflops.*`, `cuda_fp32_tflops`, `sfu_tops` with the SM
+count) and `sweep`/`required_value` apply them automatically; pass `auto_link=False` to opt
+out. With the link, doubling the SMs of a B300 speeds a compute-bound FP8 GEMM by 1.34x — not
+2x, because L2 then becomes the limiter.
+`sweep(path, values, linked=f)` re-runs the model per value (kernels are re-lowered, so
+tile auto-search re-adapts to the new hardware — important for fair comparisons).
+`required_value` bisects the smallest value meeting a step-time target (assumes
+monotonicity, which tests enforce for bandwidth knobs). Typical linked knobs: L2 BW ∝ DDR
+BW; `memory.l2.per_sm_max_GBps` (otherwise it becomes the wall above ~25 TB/s on B300).
+
+## 8b. What is *not* addressed (and what it would take)
+- **Addresses.** Tiles are identified symbolically (tensor + tile coordinate), never by
+  physical address. That is enough for capacity/reuse effects but not for L2 *set* conflicts,
+  SMEM/LDS *bank* conflicts, or HBM *channel/port* imbalance. `memory.ddr.ports` is recorded
+  and reported but the ports are aggregated into one bandwidth; per-port modelling needs an
+  address map (tensor layout, swizzle, interleave granularity) — TASKS G8.
+- **Contention that *is* visible**: L2 and HBM bandwidth contention between SMs (shared lanes
+  divided by active SMs, `per_sm_max_GBps` cap), SMEM bandwidth per SM, capacity contention
+  through occupancy (SMEM/TMEM/registers) and through the reuse-distance cache model
+  (concurrent blocks in a wave evict each other). Bank/set conflicts are approximated by the
+  associativity term and the SMEM efficiency factor.
+- **DMA.** The async copy engines that matter inside a kernel (TMA, CDNA5 TDM,
+  `buffer_load→LDS`) are modelled as load paths with their own issue-rate lanes. A separate
+  copy engine doing H2D/P2P transfers concurrently with compute is not — it would be a lane
+  plus an overlap rule (TASKS G9).
+
+## 9. Known limitations
+No warp-level issue model, no register allocation, no instruction-level scheduling
+(same as the paper). Expert-load imbalance, MTP/speculative decoding, paged-KV page
+effects, quantization kernels, chunked prefill and real compute–comm overlap are
+backlog items (docs/TASKS.md). All `[calib]` constants are placeholders until the
+calibration suite runs on real hardware.

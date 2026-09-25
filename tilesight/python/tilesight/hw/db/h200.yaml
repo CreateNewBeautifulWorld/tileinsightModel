@@ -1,0 +1,39 @@
+name: H200
+arch: sm90
+sms: 132
+clock_ghz: 1.83
+dies: 1
+compute:
+  tc_dense_tflops: {fp8: 1979, int8: 1979, bf16: 989, fp16: 989, tf32: 494}
+  tc_min_m: 64
+  mma_latency_cycles: 64      # [calib] one tile MMA, issue-to-result
+  cuda_latency_cycles: 4      # [calib]
+  sfu_latency_cycles: 16      # [calib]            # wgmma M=64 per warpgroup
+  cta_pair: false         # no 2-CTA MMA on Hopper
+  cluster_multicast: true # [spec] clusters + TMA multicast do exist
+  cuda_fp32_tflops: 61.8
+  sfu_tops: 3.9
+efficiency: {tc: 0.94, cuda: 0.8, sfu: 0.95, ddr: 0.875, l2: 0.85, smem: 0.9}
+memory:
+  queueing: {coef: 0.5, max_factor: 3.0}   # [calib] M/D/1-style latency inflation
+  outstanding: {per_sm_lines: 512, dma_per_engine_lines: 1024}   # [calib] MSHR-style limit
+  dma: {engines: 8, per_l2_block: true, destination: smem}     # [calib]
+  l1: {owner: cluster, capacity_KB: 256, smem_carveout_KB: 228, cluster_size: 2, cache_global_loads: true, capacity_derate: 1.0, bytes_per_clk: 128, latency_cycles: 20, policy: lru}   # derate 1.0 = no loss by default
+  interleave_KB: 1       # [calib]
+  addressing:            # dump with `tilesight addrmap`
+    addr_bits: 48
+    l2:  {ports: 12, mode: interleave, granularity_KB: 1}   # [calib]
+    ddr: {ports: 8, mode: interleave, granularity_KB: 1}   # [calib/spec] one per stack
+  ddr: {capacity_GB: 141, bandwidth_TBps: 4.8, latency_ns: 750}
+  l2: {capacity_derate: 1.0, capacity_MB: 50, capacity_derate: 1.0, assoc: 16, bandwidth_TBps: 9.2, latency_ns: 300, per_sm_max_GBps: 120}
+  onchip:
+    smem: {capacity_KB: 228, bytes_per_clk: 128, latency_cycles: 30}
+    # no tmem on Hopper: accumulators live in registers
+load_paths:
+  tma: {engine: dma, per_sm_GBps: 160, latency_ns: 100, smem_direct: true, multicast: true, regs_per_thread: 0, issue_bytes_per_clk: 0}
+  lsu: {engine: lsu, per_sm_GBps: 110, latency_ns: 50, smem_direct: false, multicast: false, regs_per_thread: 16, issue_bytes_per_clk: 64}
+occupancy: {max_blocks_per_sm: 32, max_threads_per_sm: 2048, regs_per_sm: 65536, max_regs_per_thread: 255}
+network:
+  nvlink: {domain_size: 8, bandwidth_GBps: 450, alpha_us: 3.0}
+  scaleout: {bandwidth_GBps: 50, alpha_us: 8.0}
+runtime: {launch_overhead_us: 2.5}

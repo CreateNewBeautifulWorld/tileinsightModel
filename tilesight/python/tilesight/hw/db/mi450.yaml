@@ -1,0 +1,71 @@
+# AMD Instinct MI450 / MI455X (CDNA5, Helios).  UNVERIFIED IN PLACES — see docs/research/02.
+# Conflicts to settle with a probe before trusting absolute numbers:
+#   * HBM bandwidth 23.3 TB/s (AMD product page, 2026) vs 19.6 TB/s (2025 preview)
+#   * FP8 20 PFLOPS (AMD "half of FP4") vs ~3.2 PFLOPS (one deep-dive)
+#   * `sms` below is AMD's 256 WGPs; if CDNA5 WGP = 2 CU, set 512 and halve the per-unit rates
+name: MI450
+arch: cdna5
+sms: 256                 # [rumor] 256 WGPs
+clock_ghz: 2.4           # [spec] max engine clock
+dies: 8                  # XCDs on N2
+wavefront: 64
+
+compute:
+  tc_dense_tflops:
+    fp4: 40000           # [spec] ~40 PFLOPS MXFP4 dense
+    fp6: 20000           # [spec] "half of FP4" framing
+    fp8: 20000           # [conflict] see header
+    int8: 20000          # [calib]
+    bf16: 10000          # [calib] assumed half of FP8
+    fp16: 10000          # [calib]
+  tc_min_m: 16
+  mma_latency_cycles: 64      # [calib] one MFMA tile, issue-to-result
+  cuda_latency_cycles: 4      # [calib]
+  sfu_latency_cycles: 24      # [calib]
+  cta_pair: false
+  cuda_fp32_tflops: 315  # [spec] vector FP32/FP16 ~2x MI355X
+  sfu_tops: 9.8          # [calib]
+efficiency: {tc: 0.85, cuda: 0.75, sfu: 0.45, ddr: 0.85, l2: 0.80, smem: 0.85}
+
+memory:
+  queueing: {coef: 0.5, max_factor: 3.0}   # [calib] M/D/1-style latency inflation
+  outstanding: {per_sm_lines: 256, dma_per_engine_lines: 1024}   # [calib] MSHR-style limit
+  dma: {engines: 8, per_l2_block: true, destination: smem}     # [calib]
+  l1: {owner: sm, capacity_KB: 64, smem_carveout_KB: 0, cluster_size: 1, cache_global_loads: true, capacity_derate: 1.0, bytes_per_clk: 128, latency_cycles: 30, policy: lru}   # derate 1.0 = no loss by default
+  interleave_KB: 1       # [calib]
+  addressing:            # dump with `tilesight addrmap`
+    addr_bits: 48
+    l2:  {ports: 32, mode: interleave, granularity_KB: 1}   # [calib]
+    ddr: {ports: 8, mode: interleave, granularity_KB: 1}   # [calib/spec] one per stack
+  ddr: {capacity_GB: 432, bandwidth_TBps: 23.3, latency_ns: 900}    # [spec] HBM4 (19.6 in the older preview)
+  l2:
+    capacity_derate: 1.0    # DEFAULT: no loss; lower it only with a measurement
+    capacity_derate: 1.0    # DEFAULT: no loss. Lower it only with a measurement to back it up.
+    partitions: 8        # [calib] independent L2 partitions (tile-level LRU each)
+    policy: lru
+    waves_simulated: 2
+    blocks: 8            # [calib] independent L2 blocks, each with its own port(s)
+    ports_per_block: 1
+    bytes_per_clk_per_port: 2048   # [calib]
+    line_bytes: 128
+    sector_bytes: 64
+    capacity_MB: 256                 # [calib] MALL size unconfirmed for CDNA5
+    # effective_capacity_MB: 200   # optional measured-cliff override
+    assoc: 16
+    bandwidth_TBps: 40.0             # [calib]
+    latency_ns: 450
+    per_sm_max_GBps: 160             # [calib]
+  onchip:
+    smem: {capacity_KB: 160, bytes_per_clk: 128, latency_cycles: 40}   # [calib] CDNA4 value carried over
+
+load_paths:
+  tdm: {engine: dma, per_sm_GBps: 220, latency_ns: 110, smem_direct: true, multicast: true, regs_per_thread: 0, issue_bytes_per_clk: 0}         # [calib] CDNA5 Tensor Data Mover (async global->LDS)
+  buffer_lds: {engine: dma, per_sm_GBps: 160, latency_ns: 120, smem_direct: true, multicast: false, regs_per_thread: 0, issue_bytes_per_clk: 0}
+  lsu: {engine: lsu, per_sm_GBps: 100, latency_ns: 80, smem_direct: false, multicast: false, regs_per_thread: 16, issue_bytes_per_clk: 64}
+load_paths_default: tdm
+
+occupancy: {max_blocks_per_sm: 16, max_threads_per_sm: 2048, regs_per_sm: 131072, max_regs_per_thread: 512}
+network:
+  nvlink: {domain_size: 72, bandwidth_GBps: 1800, alpha_us: 4.0}    # [spec] UALink-over-Ethernet, Helios rack
+  scaleout: {bandwidth_GBps: 300, alpha_us: 9.0}
+runtime: {launch_overhead_us: 3.0}

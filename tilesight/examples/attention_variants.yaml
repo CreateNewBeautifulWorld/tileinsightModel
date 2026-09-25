@@ -1,0 +1,41 @@
+# One model, three attention families side by side (each layer group is independent).
+# Run: tilesight run --model examples/attention_variants.yaml --hw b300 --phase prefill --batch 1 --seq 16384 --dp 1
+name: attention-zoo
+hidden: 4096
+vocab: 32000
+layers:
+  - name: mha_flash                # plain multi-head attention, fused kernel
+    repeat: 4
+    blocks:
+      - {type: norm}
+      - {type: mha, heads: 32, head_dim: 128, impl: flash}
+      - {type: norm}
+      - {type: mlp, d_ff: 11008}
+  - name: mha_naive                # same shapes, scores/softmax/PV as 3 kernels
+    repeat: 4
+    blocks:
+      - {type: norm}
+      - {type: mha, heads: 32, head_dim: 128, impl: naive}
+      - {type: norm}
+      - {type: mlp, d_ff: 11008}
+  - name: gqa_swa                  # GQA 32q/8kv, sliding window, qk-norm, partial rope
+    repeat: 4
+    blocks:
+      - {type: norm}
+      - {type: gqa, heads: 32, kv_heads: 8, head_dim: 128, sliding_window: 4096, qk_norm: true, rope_dim: 64}
+      - {type: norm}
+      - {type: mlp, d_ff: 11008}
+  - name: mqa                      # kv_heads: 1
+    repeat: 4
+    blocks:
+      - {type: norm}
+      - {type: gqa, heads: 32, kv_heads: 1, head_dim: 128}
+      - {type: norm}
+      - {type: mlp, d_ff: 11008}
+  - name: mla_expanded             # MLA without absorption even in decode
+    repeat: 4
+    blocks:
+      - {type: norm}
+      - {type: mla, heads: 32, q_lora_rank: 1024, kv_lora_rank: 512, qk_nope: 128, qk_rope: 64, v_head: 128, absorb: false}
+      - {type: norm}
+      - {type: mlp, d_ff: 11008}

@@ -1,0 +1,39 @@
+# A deliberately simple starting point: 10 layers of a Kimi-K3-shaped model on ONE GPU.
+# Standard flash attention (MLA) + a sparse MoE. Dimensions follow the public K3 config;
+# `experts` here is what this GPU holds, and every one of them is loaded (the model cannot
+# know which are active), while `topk` sets the sparsity.
+name: kimi-k3-10L
+hidden: 7168
+layers: 10                 # layers of this kind resident on this GPU
+
+attention:
+  type: mla                # multi-head latent attention
+  impl: flash              # standard fused (flash) attention
+  heads: 96
+  q_lora_rank: 1536
+  kv_lora_rank: 512        # KV cache is the latent: (512 + 64) per token per layer
+  qk_nope: 128
+  qk_rope: 64
+  v_head: 128
+  absorb: auto             # absorbed in decode, expanded in prefill
+  causal: true
+
+ffn:
+  type: moe
+  experts: 112             # routed experts held on this GPU (896 total / 8-way expert split)
+  topk: 16                 # sparsity: 16 of 896 experts per token
+  d_ff: 3072               # per-expert FFN width
+  shared_experts: 2
+
+dtypes:
+  weight: fp8              # attention / dense weights
+  expert: fp4              # routed expert weights (K3 ships MXFP4)
+  activation: bf16
+  kv: bf16                 # KV cache datatype
+  compute: fp8
+  attn_compute: bf16
+
+run:
+  phase: decode
+  batch: 32                # sequences resident on this GPU
+  seq_len: 8192            # KV length now (use max_seq_len for the capacity question)
