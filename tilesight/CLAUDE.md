@@ -15,12 +15,15 @@ Python = configuration, lowering, reports. C++ (nanobind) = engine hot path.
 The Python engine in `gpuTilingPerfHWModel/model/engine/reference.py` is the **executable spec**; C++ must match it.
 
 ## Layout
-`python/tilesight/` has one big self-contained folder (`gpuTilingPerfHWModel/`, the model itself —
-no b200/Kimi specifics inside it, could be lifted out and run standalone) plus the things that
-*use* it, sitting next to it:
+This project's own root doubles as the "tilesight" package root — flat layout, no `src/` or
+`python/` wrapper (`pyproject.toml`'s `wheel.packages`/`pythonpath` point back at this same
+directory; see the comment there for why). It has one big self-contained folder
+(`gpuTilingPerfHWModel/`, the model itself — no b200/Kimi specifics inside it, could be lifted
+out and run standalone) plus the things that *use* it, sitting next to it, next to `docs/`,
+`tests/`, `examples/` and this file:
 
 ```
-python/tilesight/
+tilesight/                   (this directory - both the project root and the package root)
   gpuTilingPerfHWModel/       the model, standalone. No preset data lives in here — it reads
                               gpuPresets/ and modelPresets/ (both outside it) by relative path.
     interfaceAndRun/           the ONLY entry point into model/ — nothing outside this folder
@@ -83,8 +86,9 @@ gpuTilingPerfHWModel/model/cpp/src/{engine,cache}.cpp,
 gpuTilingPerfHWModel/model/cpp/bindings/bind.cpp   native mirror of model/engine/{reference,cache}.py;
                              lives inside model/ since that's the folder this mirrors, and the
                              intent is for it to eventually replace the Python there entirely.
-                             The compiled extension still lands at python/tilesight/_core*.so
-                             (CMakeLists.txt), since `from tilesight import _core` expects it there.
+                             The compiled extension still lands right at this directory's root
+                             as _core*.so (CMakeLists.txt), since `from tilesight import _core`
+                             expects it right next to gpuTilingPerfHWModel/.
 tests/   examples/   docs/DESIGN.md   docs/TASKS.md   docs/research/*.md (background + specs)
 ```
 
@@ -92,15 +96,15 @@ tests/   examples/   docs/DESIGN.md   docs/TASKS.md   docs/research/*.md (backgr
 ```bash
 pip install -e ".[dev]"                     # builds C++ via scikit-build-core + nanobind
 # or, for fast iteration:
-cmake -S . -B build && cmake --build build -j   # drops _core*.so into python/tilesight/
-PYTHONPATH=python pytest -q                     # all tests (parity tests skip if no _core)
-TILESIGHT_BACKEND=python PYTHONPATH=python pytest -q   # force reference engine
-PYTHONPATH=python python -m tilesight.cli.cli run --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8
-PYTHONPATH=python python -m tilesight.cli.cli request --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --run-config examples/request_kimi_b300.yaml
-PYTHONPATH=python python -m tilesight.cli.cli sweep --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8 \
+cmake -S . -B build && cmake --build build -j   # drops _core*.so right here, next to gpuTilingPerfHWModel/
+pytest -q                                   # all tests (pyproject.toml sets pythonpath; parity tests skip if no _core)
+TILESIGHT_BACKEND=python pytest -q          # force reference engine
+PYTHONPATH=.. python -m tilesight.cli.cli run --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8
+PYTHONPATH=.. python -m tilesight.cli.cli request --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --run-config examples/request_kimi_b300.yaml
+PYTHONPATH=.. python -m tilesight.cli.cli sweep --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8 \
     --param memory.ddr.bandwidth_TBps --values 4,8,12,16
-PYTHONPATH=python python examples/sweep_ddr_bw_b300.py
-PYTHONPATH=python python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000   # web UI on your machine
+PYTHONPATH=.. python examples/sweep_ddr_bw_b300.py
+PYTHONPATH=.. python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000   # web UI on your machine
 ```
 
 ## Invariants (do not break)

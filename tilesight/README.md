@@ -10,22 +10,22 @@ bit-identical to the Python reference engine.
 
 ```bash
 pip install -e ".[dev]"            # or: cmake -S . -B build && cmake --build build -j
-PYTHONPATH=python pytest -q
-PYTHONPATH=python python -m tilesight.cli.cli run --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 \
+pytest -q                          # pyproject.toml sets pythonpath; direct `python -m` calls below still need it
+PYTHONPATH=.. python -m tilesight.cli.cli run --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 \
     --phase decode --batch 256 --seq 8192 --dp 8
-PYTHONPATH=python python -m tilesight.cli.cli request --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --batch 256 --dp 8 \
+PYTHONPATH=.. python -m tilesight.cli.cli request --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --batch 256 --dp 8 \
     --prompt 8192 --output 4096            # TTFT, TPOT curve, peak memory, max concurrency
-PYTHONPATH=python python -m tilesight.cli.cli sweep --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode \
+PYTHONPATH=.. python -m tilesight.cli.cli sweep --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode \
     --batch 256 --seq 8192 --dp 8 --param memory.ddr.bandwidth_TBps --values 4,8,12,16
-PYTHONPATH=python python -m tilesight.cli.cli need --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode \
+PYTHONPATH=.. python -m tilesight.cli.cli need --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode \
     --batch 256 --seq 8192 --dp 8 --param memory.ddr.bandwidth_TBps --target-ms 25
-PYTHONPATH=python python -m tilesight.cli.cli dump-model --model kimi_k2.hf > my_model.yaml   # edit sizes
-PYTHONPATH=python python examples/sweep_ddr_bw_b300.py
+PYTHONPATH=.. python -m tilesight.cli.cli dump-model --model kimi_k2.hf > my_model.yaml   # edit sizes
+PYTHONPATH=.. python examples/sweep_ddr_bw_b300.py
 ```
 
 ## Web UI (compute stays on your machine)
 ```bash
-PYTHONPATH=python python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000
+PYTHONPATH=.. python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000
 ```
 Open `http://<your-machine>:8000`. The page is a **single self-contained HTML file**
 (no CDN, no fonts, no external requests) served by a stdlib HTTP server — clients only need

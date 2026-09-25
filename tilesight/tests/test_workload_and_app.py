@@ -171,7 +171,7 @@ def test_slice_config_derives_and_translates():
 def test_kimi_k3_preset_memory_matches_the_simulation():
     import yaml
     from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import memory_breakdown
-    cfg = yaml.safe_load(open("python/tilesight/modelPresets/kimi_k3_10L.yaml"))
+    cfg = yaml.safe_load(open("modelPresets/kimi_k3_10L.yaml"))
     # max_seq_len sizes the KV cache independently of the seq_len an actual run samples at
     # (that's the point — see workload.py's memory_breakdown()); run this comparison AT
     # max_seq_len so it stays a check of the KV-bytes formula, not of the two knobs' (deliberately)
@@ -229,7 +229,7 @@ def test_memory_breakdown_reports_on_chip_buffer_kv_fit_when_given_hw():
 def test_derive_endpoint_and_slice_job(url):
     import yaml
     cfg = yaml.safe_load(open("examples/slice_gpu.yaml"))
-    wl = yaml.safe_load(open("python/tilesight/modelPresets/kimi_k3_10L.yaml"))
+    wl = yaml.safe_load(open("modelPresets/kimi_k3_10L.yaml"))
     req = urllib.request.Request(url + "/api/derive", method="POST",
                                  data=json.dumps({"slice_cfg": cfg, "workload": wl}).encode(),
                                  headers={"Content-Type": "application/json"})

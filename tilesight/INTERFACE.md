@@ -180,7 +180,7 @@ shader-bound to memory-bound. `compare_attention_impl()` runs both; the web app 
 
 ```bash
 tilesight gpu --file examples/slice_gpu.yaml \
-              --workload python/tilesight/modelPresets/kimi_k3_10L.yaml   # derived numbers
+              --workload modelPresets/kimi_k3_10L.yaml   # derived numbers
 tilesight serve --host 0.0.0.0 --port 8000                                  # the 5-step web app
 ```
 

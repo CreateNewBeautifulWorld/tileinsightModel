@@ -16,12 +16,20 @@ dev = ["pytest>=7"]
 tilesight = "tilesight.cli.cli:main"
 
 [tool.scikit-build]
-wheel.packages = ["python/tilesight"]
-sdist.include = ["python/tilesight/html/*.html",
-                 "python/tilesight/gpuPresets/*.yaml",
-                 "python/tilesight/modelPresets/*"]
+# Flat layout: this project's own root doubles as the "tilesight" package root (no separate
+# src/ or python/ wrapper) - gpuTilingPerfHWModel/ sits right next to docs/, tests/, CLAUDE.md.
+# scikit-build-core has no "the package root IS the project root" option; it only accepts a
+# source path whose *last component* names the package (`Path(value).name == package_name`).
+# Since this directory is itself named "tilesight" on disk, "../tilesight" satisfies that by
+# going up to this directory's parent and back down into itself - self-referential, but it's
+# the documented way to express this layout. Tested with `pip install -e . --no-build-isolation`.
+wheel.packages = ["../tilesight"]
+# Project-level files that live alongside the package but aren't part of it.
+wheel.exclude = ["docs/**", "tests/**", "examples/**", "*.md", "*.pdf", "*.toml", "CMakeLists.txt",
+                 ".gitignore", "gpuTilingPerfHWModel/model/cpp/**"]
+sdist.include = ["html/*.html", "gpuPresets/*.yaml", "modelPresets/*"]
 cmake.build-type = "Release"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["python"]
+pythonpath = [".."]

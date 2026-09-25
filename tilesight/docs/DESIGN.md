@@ -1,7 +1,7 @@
 # DESIGN — equations, semantics, deviations
 
 ## 0. The interface: GPU config in, model behind it
-A GPU is **input**, not part of the model. `python/tilesight/gpuTilingPerfHWModel/interfaceAndRun/schema.py` declares every field
+A GPU is **input**, not part of the model. `gpuTilingPerfHWModel/interfaceAndRun/schema.py` declares every field
 the model may see — 99 fields in 15 sections, each with a type, unit, default, and a tag:
 `spec` (copy it from the vendor), `calib` (measure it), `policy` (a modelling choice) or `loss`
 (a derating knob, default always no loss). The reference is generated from it:
