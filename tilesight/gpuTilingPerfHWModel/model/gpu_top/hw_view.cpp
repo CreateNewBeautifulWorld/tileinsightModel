@@ -1,5 +1,6 @@
 #include "hw_view.hpp"
 
+#include <cmath>
 #include <limits>
 
 namespace tilesight::gpu_top {
