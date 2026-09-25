@@ -57,8 +57,8 @@ SLICE_FIELDS: tuple[SField, ...] = (
       "Cycles one tensor core needs for one MMA tile (issue-to-issue, i.e. the throughput cost)"),
     S("tensor_core.dtype", "str", "", "bf16", "tensor core",
       "Datatype of the MMA datapath. Simplification: all tensors use the KQV datatype"),
-    S("attention_tile.m", "int", "rows", 64, "tensor core", "Attention tile M (query rows / heads per block)"),
-    S("attention_tile.n", "int", "cols", 64, "tensor core", "Attention tile N (KV rows per step)"),
+    S("attention_tile.m", "int", "rows", 64, "attention tile", "Attention tile M (query rows / heads per block)"),
+    S("attention_tile.n", "int", "cols", 64, "attention tile", "Attention tile N (KV rows per step)"),
 
     S("shader_core.shared_mem_KB", "float", "KB", 228, "shader core", "Shared memory per shader core"),
     S("shader_core.shared_mem_shared_by_tc", "bool", "", True, "shader core",
