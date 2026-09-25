@@ -11,8 +11,10 @@ Analytical GPU Performance Model from Cores to Clusters") extended with:
 4. **design-space exploration**: sweep any hardware field (e.g. DDR bandwidth on a
    B300-class GPU) and bisect the value needed to hit a latency target.
 
-Python = configuration, lowering, reports. C++ (nanobind) = engine hot path.
-The Python engine in `gpuTilingPerfHWModel/model/engine/reference.py` is the **executable spec**; C++ must match it.
+Python = configuration, shape-only lowering, reports. C++ (nanobind, `tilesight._core`) = the
+whole computation (`gpuTilingPerfHWModel/model/`) — tiling search, wave decomposition, the
+round-time engine, the deterministic tile cache. There is no second (Python) implementation to
+keep in sync; `gpuTilingPerfHWModel/model/` is pure C++.
 
 ## Layout
 This project's own root doubles as the "tilesight" package root — flat layout, no `src/` or
@@ -40,28 +42,37 @@ tilesight/                   (this directory - both the project root and the pac
       run_config.py                 RunConfig: phase/batch/seq/parallelism/dtypes
       runner.py                     CurModelConfig (model_spec+run_config bundle), run() the
                                      public entry point, run_model() the lower-level 3-arg one,
-                                     tile resolution, ModelReport
+                                     tile resolution, ModelReport — the only Python caller of
+                                     tilesight._core (gpuTilingPerfHWModel/model/)
+      lower.py                      blocks -> Ops for ONE GPU (parallelism semantics, DESIGN
+                                     §6) — shape/dtype arithmetic over ModelSpec/RunConfig only,
+                                     never HardwareSpec, so it stays Python alongside the schemas
+      attention_blocks.py           mha / gqa(+mqa) / mla blocks, flash | naive cores, KV-cache
+                                     sizing (DESIGN §5.2b) — same reason as lower.py
+      memmap.py                     per-GPU memory map (weights/KV/activations base+size), used
+                                     by genResult/addressing.py and the `memmap` CLI command
       workload.py                    one-layer "workload" shortcut -> CurModelConfig (model/
                                      never sees a workload dict, only the CurModelConfig it becomes)
       request.py                      prompt_len + output_len -> TTFT, TPOT curve, peak memory,
                                       max concurrency
-    model/                      the actual computation. Reached only through
-                                interfaceAndRun/runner.py, never a public entry point of its own.
-                                Currently Python (the C++ mirror below covers the engine/cache hot
-                                path only); the intent is for this whole folder to eventually be C++.
-      ir/kernel.py                Action / Kernel / KernelResult  (engine contract)
-      engine/reference.py         pipeline-envelope engine (DESIGN §3)       <- spec
-      engine/cache.py             tile reuse-distance + SDCM L2 model (DESIGN §4) <- spec
-      engine/backend.py           picks C++ _core if built (TILESIGHT_BACKEND=python|cpp)
-      engine/cpp_bridge.py        packs Python IR into lane-indexed C++ structs
-      kernels/gemm.py             GEMM / batched / grouped(MoE) lowering + elementwise
-      kernels/attention.py        decode (split-KV, MLA) and causal prefill lowering
-      kernels/comm.py             alpha-beta collectives
-      kernels/tiles.py            TileConfig / AttnTileConfig + search spaces
-      lower.py                    blocks -> Ops for ONE GPU (parallelism semantics, DESIGN §6)
-      attention_blocks.py         mha / gqa(+mqa) / mla blocks, flash | naive cores, KV-cache
-                                  sizing (DESIGN §5.2b)
-      memory.py                    weights / KV / activations per GPU
+    model/                      the actual computation: a pure C++ nanobind extension
+                                (tilesight._core). Reached only through interfaceAndRun/runner.py,
+                                never a public entry point of its own. No Python implementation
+                                lives here — see the folder-by-folder map right below.
+      gpu_top/                    orchestrator: lowering (shape+tile -> a tile execution plan,
+                                  per op kind: gemm/attention/comm) and the wave-decomposition
+                                  scheduler that calls the other four folders (DESIGN §3, §5);
+                                  the nanobind bindings (bindings.cpp) live here too
+      shader_core/                 one core's per-lane time; the steady-state K-loop round
+                                   formula (DESIGN §3)
+      shader_slice/                 grid -> waves; the slice-shared L1
+      on_chip_buffer/                the optional staging SRAM between the shader slices and the
+                                     memory slices
+      memory_slice/                   the L2 port + DMA port + HBM behind it
+      common/cache/                    the deterministic tile-level cache simulation (DESIGN §4),
+                                       shared by on_chip_buffer and memory_slice
+      memory.py                    weights / KV / activations per GPU (stays Python — standalone
+                                   capacity math over many ops, not part of one op's engine)
       dse/sweep.py                  sweep + required_value (bisection); repeatedly runs the model
     genResult/                  turns a ModelReport into something to look at or download; pulls
                                 its data from whatever interfaceAndRun/runner.py already computed.
@@ -81,14 +92,9 @@ tilesight/                   (this directory - both the project root and the pac
                               reaches into model/ directly.
   html/index.html, html/app.html   self-contained UI (no CDN/fonts/external requests) served by
                               cli/server.py — keep it that way
-gpuTilingPerfHWModel/model/cpp/include/tilesight/engine.hpp,
-gpuTilingPerfHWModel/model/cpp/src/{engine,cache}.cpp,
-gpuTilingPerfHWModel/model/cpp/bindings/bind.cpp   native mirror of model/engine/{reference,cache}.py;
-                             lives inside model/ since that's the folder this mirrors, and the
-                             intent is for it to eventually replace the Python there entirely.
-                             The compiled extension still lands right at this directory's root
-                             as _core*.so (CMakeLists.txt), since `from tilesight import _core`
-                             expects it right next to gpuTilingPerfHWModel/.
+The compiled extension (CMakeLists.txt builds every gpuTilingPerfHWModel/model/**/*.cpp into it)
+lands right at this directory's root as _core*.so, since `from tilesight import _core` expects
+it right next to gpuTilingPerfHWModel/.
 tests/   examples/   docs/DESIGN.md   docs/TASKS.md   docs/research/*.md (background + specs)
 ```
 
@@ -97,8 +103,8 @@ tests/   examples/   docs/DESIGN.md   docs/TASKS.md   docs/research/*.md (backgr
 pip install -e ".[dev]"                     # builds C++ via scikit-build-core + nanobind
 # or, for fast iteration:
 cmake -S . -B build && cmake --build build -j   # drops _core*.so right here, next to gpuTilingPerfHWModel/
-pytest -q                                   # all tests (pyproject.toml sets pythonpath; parity tests skip if no _core)
-TILESIGHT_BACKEND=python pytest -q          # force reference engine
+pytest -q                                   # all tests (pyproject.toml sets pythonpath); the C++
+                                             # build is mandatory, there is no Python fallback
 PYTHONPATH=.. python -m tilesight.cli.cli run --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8
 PYTHONPATH=.. python -m tilesight.cli.cli request --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --run-config examples/request_kimi_b300.yaml
 PYTHONPATH=.. python -m tilesight.cli.cli sweep --model kimi_k2.hf --gpu-tiling-perf-hw-model b300 --phase decode --batch 256 --seq 8192 --dp 8 \
@@ -108,9 +114,10 @@ PYTHONPATH=.. python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000   # w
 ```
 
 ## Invariants (do not break)
-1. **Parity**: any change to `gpuTilingPerfHWModel/model/engine/reference.py` or `gpuTilingPerfHWModel/model/engine/cache.py` must be mirrored
-   in `gpuTilingPerfHWModel/model/cpp/src/*.cpp` in the same change; `tests/test_cpp_parity.py` requires ≤1e-9 rel
-   error and identical bottleneck labels (tie-break = insertion order, like Python `max`).
+1. **One implementation.** `gpuTilingPerfHWModel/model/` is pure C++ — there is no Python
+   reference engine to keep in sync any more. `tests/test_cpp_parity.py` now pins the C++
+   engine's behavior against known-good analytical bounds and hand-checkable cache traces
+   (regression coverage), not Python/C++ parity.
 2. **Units**: per-SM lanes carry *seconds on one SM*; shared lanes (`l2`, `ddr`) carry
    *bytes*. Lowerings convert with `HardwareSpec.*_time_per_sm`. Never mix.
 3. **Equations live in docs/DESIGN.md.** If you change a formula, update the DESIGN
@@ -118,10 +125,11 @@ PYTHONPATH=.. python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000   # w
 4. **Hardware numbers are tagged** `[spec]` or `[calib]` in YAML. Never silently change
    a `[spec]` value; `[calib]` values are replaced only by the calibration suite output.
 5. **Hardware is data.** New HW features = new YAML fields + lanes; the engine core stays
-   lane-generic. Do not hard-code GPU names in gpuTilingPerfHWModel/model/engine or gpuTilingPerfHWModel/model/kernels code (use capability flags
-   like `compute.cta_pair`, presence of `memory.onchip.tmem`).
-6. **One GPU's view.** `gpuTilingPerfHWModel/model/lower.py` emits the ops executed by one GPU; parallelism
-   only changes shapes and adds collectives there. Keep this property.
+   lane-generic. Do not hard-code GPU names in gpuTilingPerfHWModel/model/ C++ or in
+   interfaceAndRun/lower.py / attention_blocks.py (use capability flags like
+   `compute.cta_pair`, presence of `memory.onchip.tmem`).
+6. **One GPU's view.** `gpuTilingPerfHWModel/interfaceAndRun/lower.py` emits the ops executed by
+   one GPU; parallelism only changes shapes and adds collectives there. Keep this property.
 7. **Attribution**: every second of kernel time is charged to exactly one coarse limiter
    and one fine `limiter_detail` key; the sums must match (`test_detail_attributes_tensor`).
    New actions must be named `<verb>:<tensor>` (e.g. `load:kv_cache(K)`) so reports can
@@ -146,18 +154,22 @@ PYTHONPATH=.. python -m tilesight.cli.cli serve --host 0.0.0.0 --port 8000   # w
 - **New load path**: add under `load_paths.<name>`; select per tile via
   `TileConfig(load_path="name")` or split `"split:tma=0.7,lsu=0.3"`.
 - **New attention variant** (e.g. DSA/NSA sparse, linear attention): add a lowering in
-  `gpuTilingPerfHWModel/model/attention_blocks.py`, reuse `attn_core` if it is softmax attention, extend
-  `kv_bytes_per_seq`, and add a flash-vs-naive test in `tests/test_attention_variants.py`.
+  `gpuTilingPerfHWModel/interfaceAndRun/attention_blocks.py`, reuse `attn_core` if it is softmax
+  attention, extend `kv_bytes_per_seq`, and add a flash-vs-naive test in
+  `tests/test_attention_variants.py`.
 - **New block type** (e.g. `mamba`): add a branch in
-  `gpuTilingPerfHWModel/model/lower.py::lower_block`, KV/state accounting in `gpuTilingPerfHWModel/model/memory.py`, and a test.
-- **New kernel family**: write `lower_*` returning `list[Kernel]` (or None if the tile is
-  illegal), register its op kind in `gpuTilingPerfHWModel/interfaceAndRun/runner.py::resolve_op`, add a search space.
+  `gpuTilingPerfHWModel/interfaceAndRun/lower.py::lower_block`, KV/state accounting in
+  `gpuTilingPerfHWModel/model/memory.py`, and a test.
+- **New kernel family**: add a `lower_*` function to `gpuTilingPerfHWModel/model/gpu_top/gpu_top.cpp`
+  (typed args in, `optional<vector<LoweredKernel>>` out — `nullopt` for an illegal tile), bind it
+  in `bindings.cpp`, register its op kind in
+  `gpuTilingPerfHWModel/interfaceAndRun/runner.py::resolve_op`, add a search space.
 
 ## Working style for tasks
 - Take tasks from `docs/TASKS.md` in order unless told otherwise. Each task lists
   acceptance criteria; write the test first, then the code.
-- Keep the reference engine readable; optimize only in C++.
-- After each task: run the full test suite with both backends and
-  `examples/kimi_k2_b300.py`; report step-time deltas vs. before in the PR/commit message.
+- Keep the engine readable; it's all C++ now — no separate "optimize only in C++" step.
+- After each task: run the full test suite and `examples/kimi_k2_b300.py`; report step-time
+  deltas vs. before in the PR/commit message.
 - When a paper detail is ambiguous, implement the simplest defensible version, document
   it in DESIGN.md under "Deviations/assumptions", and make it switchable if cheap.

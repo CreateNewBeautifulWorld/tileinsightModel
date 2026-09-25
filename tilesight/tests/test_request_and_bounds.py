@@ -1,16 +1,25 @@
 """Request-level runs (prompt/output, peak memory) and fine-grained bound attribution."""
 from dataclasses import replace
 
-from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm, occupancy
-from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
-from tilesight.gpuTilingPerfHWModel.model.engine import reference
+from tilesight import HardwareSpec, ModelSpec, RunConfig, _core, run_model
 from tilesight.gpuTilingPerfHWModel.model.memory import kv_bytes_per_seq_all
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.request import run_request
 from tilesight.gpuTilingPerfHWModel.genResult.table import resource_class
 
 B300, H200 = HardwareSpec.load("b300"), HardwareSpec.load("h200")
 KIMI = ModelSpec.load("kimi_k2.hf")
+
+TileConfig = _core.GemmTile
+occupancy = _core.occupancy
+
+
+def lower_gemm(cur_gpu_config, name, M, N, K, **kw):
+    kw.setdefault("tile", TileConfig())
+    return _core.lower_gemm(cur_gpu_config, name, M, N, K, **kw)
+
+
+def evaluate(k, hw):
+    return _core.evaluate(hw, k)
 
 
 def test_tpot_grows_with_kv_and_peak_is_prompt_plus_output():
@@ -75,31 +84,28 @@ def test_resource_class_parsing():
 
 
 def test_timeline_matches_engine_round_and_lanes():
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm as lg
     from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline, timeline_text
-    from tilesight.gpuTilingPerfHWModel.model.engine import backend
     cur_gpu_config = B300
-    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    k = lower_gemm(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
     tl = steady_timeline(k, cur_gpu_config)
-    r = backend.evaluate(k, cur_gpu_config)
+    r = evaluate(k, cur_gpu_config)
     # the timeline's round x iters reproduces the engine's steady time (first wave)
     assert abs(tl["round_s"] - max(tl["resource_bound_s"], tl["latency_bound_s"])) < 1e-15
-    assert abs(tl["total_s"] * (k.num_blocks / (cur_gpu_config.sms * tl["resident"])) - r.time_s) / r.time_s < 0.35
+    assert abs(tl["total_s"] * (k.trace.num_blocks / (cur_gpu_config.sms * tl["resident"])) - r.time_s) / r.time_s < 0.35
     assert tl["limiter"] == "tc" and "tc" in tl["lanes"] and "ddr" in tl["lanes"]
     # every steady item lies inside the drawn window and loads are prefetches
     for it in tl["steady"]:
         assert it["end"] >= it["start"] >= 0
         if it["action"].startswith("load"):
-            assert it["iteration"] == it["round"] + k.stages - 1
+            assert it["iteration"] == it["round"] + k.trace.stages - 1
     txt = timeline_text(tl)
     assert "round" in txt and "tc" in txt
 
 
 def test_timeline_reflects_the_bottleneck():
-    from tilesight.gpuTilingPerfHWModel.model.kernels.attention import lower_attention_decode
     from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline
-    k = lower_attention_decode(B300, "a", B=32, H=64, kv_heads=1, S=8192,
+    k = _core.lower_attention_decode(B300, "a", B=32, H=64, kv_heads=1, S=8192,
                                d_qk=576, d_v=512, v_in_k=True)[0]
     tl = steady_timeline(k, B300)
     busy = {l: sum(i["lanes"].get(l, 0.0) for i in tl["steady"] if i["round"] == 0) for l in tl["lanes"]}
@@ -109,10 +115,9 @@ def test_timeline_reflects_the_bottleneck():
 
 
 def test_timeline_cycles_and_trace_text():
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm as lg
     from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline, timeline_text, trace_text
     cur_gpu_config = B300
-    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    k = lower_gemm(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
     tl = steady_timeline(k, cur_gpu_config)
     # cycles are seconds x clock, consistently on every item
@@ -122,23 +127,22 @@ def test_timeline_cycles_and_trace_text():
         for lane, v in it["lanes"].items():
             assert abs(it["lanes_cyc"][lane] - v * cur_gpu_config.clock_hz) < 1e-6
     # wave decomposition is reported (paper §3.4)
-    assert tl["full_waves"] * cur_gpu_config.sms * tl["resident"] + tl["tail_blocks"] == k.num_blocks
+    assert tl["full_waves"] * cur_gpu_config.sms * tl["resident"] + tl["tail_blocks"] == k.trace.num_blocks
     # both gantt units render
     assert "cyc" in timeline_text(tl, unit="cyc") and "us" in timeline_text(tl)
     txt = trace_text(tl, "gemm", cur_gpu_config.name)
     for needle in ("start_cyc", "gantt (cycles)", "lane occupancy in one round", "blocks ->"):
         assert needle in txt
     # every steady action appears as an event row
-    assert all(a.name in txt for a in k.body)
+    assert all(a.name in txt for a in k.trace.body)
 
 
 def test_cycle_csv_one_row_per_cycle_one_column_per_unit():
     import csv as _csv
     import io
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm as lg
     from tilesight.gpuTilingPerfHWModel.genResult.timeline import cycle_csv, machine_timeline, steady_timeline
     cur_gpu_config = B300
-    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    k = lower_gemm(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
     tl = steady_timeline(k, cur_gpu_config)
     rows = list(_csv.DictReader(io.StringIO(cycle_csv(tl))))
@@ -158,20 +162,19 @@ def test_cycle_csv_one_row_per_cycle_one_column_per_unit():
     # full mode covers prologue + every iteration + epilogue
     assert len(cycle_csv(tl, full=True).splitlines()) > len(cycle_csv(tl).splitlines())
     m = machine_timeline(tl)
-    assert sum(w["blocks"] for w in m["waves"]) == k.num_blocks
+    assert sum(w["blocks"] for w in m["waves"]) == k.trace.num_blocks
     assert m["waves"][-1]["active_sms"] <= cur_gpu_config.sms
 
 
 def test_excel_grid_colours_tiles_by_iteration(tmp_path):
     from openpyxl import load_workbook
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm as lg
     from tilesight.gpuTilingPerfHWModel.genResult.excel import write_excel
     from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline
     cur_gpu_config = B300
-    k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+    k = lower_gemm(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, stages=4, cluster_m=2))[0]
     tl = steady_timeline(k, cur_gpu_config)
-    assert tl["rounds_shown"] >= k.stages          # load and its consumer both visible
+    assert tl["rounds_shown"] >= k.trace.stages          # load and its consumer both visible
     out = tmp_path / "t.xlsx"
     info = write_excel(tl, str(out), "gemm", cur_gpu_config.name)
     ws = load_workbook(out)["timeline"]
@@ -196,20 +199,18 @@ def test_excel_grid_colours_tiles_by_iteration(tmp_path):
 
 
 def test_extra_onchip_buffer_cuts_hbm_traffic():
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm as lg
     sram = {"memory.sram": {"capacity_MB": 2048, "effective_capacity_MB": 2048,
                             "bandwidth_TBps": 15.0, "latency_ns": 400, "assoc": 16,
                             "per_sm_max_GBps": 180}}
     tile = TileConfig(bm=64, bn=256, bk=64)
-    base = lg(B300, "g", 8, 4096, 7168, batch=48, a_dtype="fp8", b_dtype="fp8",
+    base = lower_gemm(B300, "g", 8, 4096, 7168, batch=48, a_dtype="fp8", b_dtype="fp8",
               compute_dtype="fp8", tile=tile)[0]
-    with_buf = lg(B300.override(sram), "g", 8, 4096, 7168, batch=48, a_dtype="fp8",
+    with_buf = lower_gemm(B300.override(sram), "g", 8, 4096, 7168, batch=48, a_dtype="fp8",
                   b_dtype="fp8", compute_dtype="fp8", tile=tile)[0]
-    ddr_before = sum(a.work.get("ddr", 0) for a in with_buf.body)
-    assert ddr_before < sum(a.work.get("ddr", 0) for a in base.body)
-    assert any(a.work.get("sram", 0) > 0 for a in with_buf.body)
-    from tilesight.gpuTilingPerfHWModel.model.engine import backend
-    assert backend.evaluate(with_buf, B300.override(sram)).time_s < backend.evaluate(base, B300).time_s
+    ddr_before = sum(a.work.get("ddr", 0) for a in with_buf.trace.body)
+    assert ddr_before < sum(a.work.get("ddr", 0) for a in base.trace.body)
+    assert any(a.work.get("sram", 0) > 0 for a in with_buf.trace.body)
+    assert evaluate(with_buf, B300.override(sram)).time_s < evaluate(base, B300).time_s
 
 
 def test_buffer_closed_form_and_search_agree_on_direction():

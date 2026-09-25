@@ -5,17 +5,19 @@ import fnmatch
 import json
 from dataclasses import dataclass, field
 
-from tilesight.gpuTilingPerfHWModel.model.engine import backend
+from tilesight import _core
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import HardwareSpec
-from tilesight.gpuTilingPerfHWModel.model.ir.kernel import Kernel, KernelResult
-from tilesight.gpuTilingPerfHWModel.model.kernels import comm
-from tilesight.gpuTilingPerfHWModel.model.kernels.attention import lower_attention_decode, lower_attention_prefill
-from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_elementwise, lower_gemm
-from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import AttnTileConfig, TileConfig, attn_search_space, gemm_search_space
-from tilesight.gpuTilingPerfHWModel.model.lower import Op, lower_model
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.lower import Op, lower_model
 from tilesight.gpuTilingPerfHWModel.model.memory import MemoryReport, memory_report
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.model_spec import ModelSpec
+
+# type aliases: a "Kernel" the rest of this module builds/searches over is a _core.LoweredKernel
+# (trace + reporting meta); a "KernelResult" is what _core.evaluate() returns. gpu_top (C++) owns
+# the actual per-op-kind lowering/tiling-search/engine — this module only orchestrates which
+# candidates to try and which one wins.
+Kernel = _core.LoweredKernel
+KernelResult = _core.KernelResult
 
 
 @dataclass
@@ -112,7 +114,7 @@ class ModelReport:
     rc: RunConfig
     ops: list[OpResult]
     memory: MemoryReport
-    backend: str = backend.BACKEND
+    backend: str = "cpp"
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -190,13 +192,13 @@ def _override(cur_gpu_config: HardwareSpec, name: str) -> dict | None:
 
 
 def _eval_all(kernels: list[Kernel], cur_gpu_config) -> list[KernelResult]:
-    return [backend.evaluate(k, cur_gpu_config) for k in kernels]
+    return [_core.evaluate(cur_gpu_config, k) for k in kernels]
 
 
 def _best(cands, cur_gpu_config):
     best = None
     for tile, ks in cands:
-        if ks is None:
+        if not ks:
             continue
         res = _eval_all(ks, cur_gpu_config)
         t = sum(r.time_s for r in res)
@@ -211,54 +213,58 @@ def resolve_op(op: Op, cur_gpu_config: HardwareSpec, rc: RunConfig) -> tuple[lis
         ov = _override(cur_gpu_config, op.name)
         gemm_tile = _tile_policy(cur_gpu_config, "gemm")
         if ov is not None:
-            tiles = [TileConfig(**ov)]
+            tiles = [_core.GemmTile(**ov)]
         elif gemm_tile == "auto":
-            tiles = gemm_search_space(p["M"], p["N"], p["K"])
+            tiles = _core.gemm_search_space(p["M"], p["N"], p["K"])
         else:
-            tiles = [TileConfig(**gemm_tile)]
-        cands = ((t, lower_gemm(cur_gpu_config, op.name, p["M"], p["N"], p["K"], batch=p["batch"], a_dtype=p["a_dtype"],
-                                b_dtype=p["b_dtype"], c_dtype=p["c_dtype"], compute_dtype=p["compute_dtype"],
-                                tile=t, names=tuple(p.get("names", ("act", "weight", "out"))))) for t in tiles)
+            tiles = [_core.GemmTile(**gemm_tile)]
+        names = tuple(p.get("names", ("act", "weight", "out")))
+        cands = ((t, _core.lower_gemm(cur_gpu_config, op.name, p["M"], p["N"], p["K"], batch=p["batch"],
+                                      a_dtype=p["a_dtype"], b_dtype=p["b_dtype"], c_dtype=p["c_dtype"],
+                                      compute_dtype=p["compute_dtype"], tile=t, a_name=names[0],
+                                      b_name=names[1], c_name=names[2])) for t in tiles)
         best = _best(cands, cur_gpu_config)
         if best is None:
             raise ValueError(f"{op.name}: no legal tile among {len(tiles)} candidates")
-        return best[2], best[2][0].meta.get("tile", best[1].short())
+        return best[2], best[2][0].meta.get("tile", "-")
 
     if op.kind in ("attn_decode", "attn_prefill"):
         ov = _override(cur_gpu_config, op.name)
         attn_tile = _tile_policy(cur_gpu_config, "attn")
         if ov is not None:
-            tiles = [AttnTileConfig(**ov)]
+            tiles = [_core.AttnTile(**ov)]
         elif cur_gpu_config.get("compute.attention_tile_m") and cur_gpu_config.get("compute.attention_tile_n"):
             # the part fixes the attention tile: search only the pipeline knobs around it
             bm, bn = int(cur_gpu_config.get("compute.attention_tile_m")), int(cur_gpu_config.get("compute.attention_tile_n"))
-            tiles = [AttnTileConfig(block_m=bm, block_n=bn, stages=st, consumers=c)
+            tiles = [_core.AttnTile(block_m=bm, block_n=bn, stages=st, consumers=c)
                      for st in (2, 3) for c in (1, 2)]
         elif attn_tile == "auto":
-            tiles = attn_search_space()
+            tiles = _core.attn_search_space()
         else:
-            tiles = [AttnTileConfig(**attn_tile)]
+            tiles = [_core.AttnTile(**attn_tile)]
         kw = dict(B=p["B"], H=p["H"], kv_heads=p["kv_heads"], S=p["S"], d_qk=p["d_qk"], d_v=p["d_v"],
                   kv_dtype=rc.kv_dtype, compute_dtype=rc.attn_compute_dtype)
         if op.kind == "attn_decode":
-            cands = ((t, lower_attention_decode(cur_gpu_config, op.name, v_in_k=p["v_in_k"], tile=t, **kw)) for t in tiles)
+            cands = ((t, _core.lower_attention_decode(cur_gpu_config, op.name, v_in_k=p["v_in_k"], tile=t, **kw))
+                     for t in tiles)
         else:
-            cands = ((t, lower_attention_prefill(cur_gpu_config, op.name, tile=t, causal=p.get("causal", True),
-                                                 window=p.get("window", 0), **kw)) for t in tiles)
+            cands = ((t, _core.lower_attention_prefill(cur_gpu_config, op.name, tile=t, causal=p.get("causal", True),
+                                                        window=p.get("window", 0), **kw)) for t in tiles)
         best = _best(cands, cur_gpu_config)
         if best is None:
             raise ValueError(f"{op.name}: no legal attention tile")
-        return best[2], best[2][0].meta.get("tile", best[1].short())
+        return best[2], best[2][0].meta.get("tile", "-")
 
     if op.kind == "elementwise":
         q = dict(p)
-        if "names" in q:
-            q["names"] = tuple(q["names"])
-        return _eval_all(lower_elementwise(cur_gpu_config, op.name, **q), cur_gpu_config), "-"
+        names = q.pop("names", None)
+        if names:
+            q["in_name"], q["out_name"] = names[0], names[1]
+        return _eval_all(_core.lower_elementwise(cur_gpu_config, op.name, **q), cur_gpu_config), "-"
     if op.kind == "allreduce":
-        return _eval_all(comm.allreduce(cur_gpu_config, op.name, p["bytes"], p["group"]), cur_gpu_config), "-"
+        return _eval_all(_core.allreduce(cur_gpu_config, op.name, p["bytes"], p["group"]), cur_gpu_config), "-"
     if op.kind == "a2a":
-        return _eval_all(comm.all_to_all(cur_gpu_config, op.name, p["bytes"], p["group"]), cur_gpu_config), "-"
+        return _eval_all(_core.all_to_all(cur_gpu_config, op.name, p["bytes"], p["group"]), cur_gpu_config), "-"
     raise ValueError(op.kind)
 
 

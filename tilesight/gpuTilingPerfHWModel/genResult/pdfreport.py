@@ -8,7 +8,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (Flowable, PageBreak, Paragraph, SimpleDocTemplate, Spacer,
                                 Table, TableStyle)
 
-from tilesight.gpuTilingPerfHWModel.model.engine import backend
+from tilesight import _core
 from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline
 
 FONT = "Helvetica"
@@ -148,7 +148,7 @@ def write_pdf(path: str, cur_gpu_config, kernels, title: str, workload_cfg: dict
 
     for k in kernels[:3]:
         tl = steady_timeline(k, cur_gpu_config)
-        res = backend.evaluate(k, cur_gpu_config)
+        res = _core.evaluate(cur_gpu_config, k)
         story += [PageBreak(), Paragraph(f"kernel: {k.name}", h2),
                   _tbl([["latency", f"{res.time_s * 1e6:.2f} us / {res.time_s * tl['clock_hz']:.0f} cycles"],
                         ["tile", str(k.meta.get("tile", "-"))],

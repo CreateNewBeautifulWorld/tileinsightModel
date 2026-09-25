@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES
-from tilesight.gpuTilingPerfHWModel.model.lower import lower_model
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.lower import lower_model
 from tilesight.gpuTilingPerfHWModel.model.memory import kv_bytes_per_seq_all
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.model_spec import ModelSpec

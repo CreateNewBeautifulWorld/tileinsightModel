@@ -12,10 +12,18 @@ execute_process(COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
 find_package(nanobind CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-set(TS_CPP_DIR gpuTilingPerfHWModel/model/cpp)
+set(TS_MODEL_DIR gpuTilingPerfHWModel/model)
 nanobind_add_module(_core NB_STATIC
-  ${TS_CPP_DIR}/src/engine.cpp ${TS_CPP_DIR}/src/cache.cpp ${TS_CPP_DIR}/bindings/bind.cpp)
-target_include_directories(_core PRIVATE ${TS_CPP_DIR}/include)
+  ${TS_MODEL_DIR}/common/cache/cache_sim.cpp
+  ${TS_MODEL_DIR}/common/cache/address_map.cpp
+  ${TS_MODEL_DIR}/shader_core/shader_core.cpp
+  ${TS_MODEL_DIR}/shader_slice/shader_slice.cpp
+  ${TS_MODEL_DIR}/on_chip_buffer/on_chip_buffer.cpp
+  ${TS_MODEL_DIR}/memory_slice/memory_slice.cpp
+  ${TS_MODEL_DIR}/gpu_top/hw_view.cpp
+  ${TS_MODEL_DIR}/gpu_top/gpu_top.cpp
+  ${TS_MODEL_DIR}/gpu_top/bindings.cpp)
+target_include_directories(_core PRIVATE ${TS_MODEL_DIR})
 target_link_libraries(_core PRIVATE Threads::Threads)
 
 # scikit-build-core installs into the package dir; plain CMake builds drop it at this project's

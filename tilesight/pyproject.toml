@@ -26,7 +26,7 @@ tilesight = "tilesight.cli.cli:main"
 wheel.packages = ["../tilesight"]
 # Project-level files that live alongside the package but aren't part of it.
 wheel.exclude = ["docs/**", "tests/**", "examples/**", "*.md", "*.pdf", "*.toml", "CMakeLists.txt",
-                 ".gitignore", "gpuTilingPerfHWModel/model/cpp/**"]
+                 ".gitignore"]
 sdist.include = ["html/*.html", "gpuPresets/*.yaml", "modelPresets/*"]
 cmake.build-type = "Release"
 

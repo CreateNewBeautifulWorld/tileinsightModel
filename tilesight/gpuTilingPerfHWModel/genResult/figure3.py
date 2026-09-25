@@ -14,10 +14,11 @@ from __future__ import annotations
 import html
 import json
 
-from tilesight.gpuTilingPerfHWModel.model.engine import backend
+from tilesight import _core
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import HardwareSpec
-from tilesight.gpuTilingPerfHWModel.model.ir.kernel import Kernel
 from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline
+
+Kernel = _core.LoweredKernel
 
 LANE_COLOR = {"tc": "#b4552d", "cuda": "#6b8f9c", "sfu": "#8a6fb0", "smem": "#5b9279",
               "tmem": "#c2903a", "l2": "#4f7cac", "ddr": "#b3563a", "sram": "#7f9a52",
@@ -31,11 +32,11 @@ def _color(lane: str) -> str:
 def _panel_d(k: Kernel, tl: dict) -> str:
     lanes = tl["lanes"]
     rows = []
-    for i, a in enumerate(k.body):
+    for i, a in enumerate(k.trace.body):
         cells = "".join(
             f'<td class="num">{(a.work.get(l, 0) * 1e9):.1f}</td>' if not l.startswith(("l2", "ddr", "sram"))
             else f'<td class="num">{a.work.get(l, 0) / 1024:.1f} KB</td>' for l in lanes)
-        deps = ", ".join(k.body[d].name for d in a.deps) or "—"
+        deps = ", ".join(k.trace.body[d].name for d in a.deps) or "—"
         rows.append(f'<tr><td class="mono">{html.escape(a.name)}</td>{cells}'
                     f'<td class="num">{a.latency_s * tl["clock_hz"]:.0f}</td>'
                     f'<td class="mono">{html.escape(deps)}</td>'
@@ -130,7 +131,7 @@ def _panel_f(res, k: Kernel, tl: dict) -> str:
 
 def figure3_html(k: Kernel, cur_gpu_config: HardwareSpec, title: str = "", addr_fn=None) -> str:
     tl = steady_timeline(k, cur_gpu_config, addr_fn=addr_fn)
-    res = backend.evaluate(k, cur_gpu_config)
+    res = _core.evaluate(cur_gpu_config, k)
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>TileSight — {html.escape(title or k.name)}</title><style>
 body{{font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:24px;
@@ -157,11 +158,11 @@ the hardware YAML are placeholders until the microbenchmark suite runs on real s
 def figure3_json(k: Kernel, cur_gpu_config: HardwareSpec) -> str:
     """Same three panels as data, for pipelines that want the numbers rather than the page."""
     tl = steady_timeline(k, cur_gpu_config)
-    res = backend.evaluate(k, cur_gpu_config)
+    res = _core.evaluate(cur_gpu_config, k)
     return json.dumps({
-        "d": {"actions": [{"name": a.name, "work": a.work, "deps": a.deps,
+        "d": {"actions": [{"name": a.name, "work": dict(a.work), "deps": a.deps,
                            "latency_cycles": a.latency_s * tl["clock_hz"], "recurrent": a.recurrent}
-                          for a in k.body],
+                          for a in k.trace.body],
               "round_s": tl["round_s"], "resource_bound_s": tl["resource_bound_s"],
               "latency_bound_s": tl["latency_bound_s"], "limiter": tl["limiter"],
               "stages": tl["stages"], "consumers": tl["consumers"], "iters": tl["iters"]},

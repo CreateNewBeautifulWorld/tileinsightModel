@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES, HardwareSpec
-from tilesight.gpuTilingPerfHWModel.model.attention_blocks import kv_bytes_per_seq
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.attention_blocks import kv_bytes_per_seq
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.model_spec import ModelSpec
 

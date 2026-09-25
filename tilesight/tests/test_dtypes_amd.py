@@ -2,10 +2,16 @@
 import pytest
 
 from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
+from tilesight import _core
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES
-from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
-from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
 from tilesight.cli.server import _kernel_candidates
+
+TileConfig = _core.GemmTile
+
+
+def lower_gemm(cur_gpu_config, name, M, N, K, **kw):
+    kw.setdefault("tile", _core.GemmTile())
+    return _core.lower_gemm(cur_gpu_config, name, M, N, K, **kw)
 
 NV = ["b300", "b200", "h200"]
 AMD = ["mi300x", "mi325x", "mi355x", "mi450"]

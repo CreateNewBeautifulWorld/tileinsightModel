@@ -209,7 +209,16 @@ def gemm_wave_tiles(cur_gpu_config: HardwareSpec, M: int, N: int, K: int, tile, 
                     layout_a: str = "row", layout_b: str = "row", resident: int = 1, k_step: int = 0):
     """Addresses of the A and B tiles touched together by one wave at K-step `k_step`."""
     import math
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import grouped_raster
+
+    def grouped_raster(mt, nt, group_m):
+        """Triton-style GROUP_M swizzle: yields (m, n) in issue order (mirrors gpu_top's)."""
+        group_m = max(1, min(group_m, mt))
+        for g0 in range(0, mt, group_m):
+            rows = min(group_m, mt - g0)
+            for n in range(nt):
+                for r in range(rows):
+                    yield g0 + r, n
+
     mt, nt, kt = math.ceil(M / tile.bm), math.ceil(N / tile.bn), math.ceil(K / tile.bk)
     conc = cur_gpu_config.sms * max(1, resident)
     a_tb, b_tb = int(tile.bm * tile.bk * a_bytes), int(tile.bn * tile.bk * b_bytes)

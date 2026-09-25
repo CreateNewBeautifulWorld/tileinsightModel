@@ -1,37 +1,45 @@
 """DMA vs LSU engines, mega-tile staging, tile-granularity addressing, L2/buffer trade."""
 import pytest
 
-from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.gpuTilingPerfHWModel.model.engine import backend
-from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm, occupancy
-from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+from tilesight import HardwareSpec, ModelSpec, RunConfig, _core, run_model
 from tilesight.gpuTilingPerfHWModel.genResult.addressing import analyze_gemm, spread, tile_index
 from tilesight.gpuTilingPerfHWModel.model.dse.buffer import l2_tradeoff, with_buffer
 
 HW = HardwareSpec.load("b300")
 
+TileConfig = _core.GemmTile
+
+
+def evaluate(k, hw):
+    return _core.evaluate(hw, k)
+
+
+def _lower_gemm(cur_gpu_config, M=4096, N=4096, K=7168, **kw):
+    kw.setdefault("tile", TileConfig())
+    return _core.lower_gemm(cur_gpu_config, "g", M, N, K, **kw)
+
 
 def _k(cur_gpu_config, path="tma", **kw):
     t = TileConfig(bm=128, bn=256, bk=64, load_path=path, **kw)
-    ks = lower_gemm(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
-                    compute_dtype="fp8", tile=t)
+    ks = _lower_gemm(cur_gpu_config, 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
+                     compute_dtype="fp8", tile=t)
     return ks[0] if ks else None
 
 
 def test_dma_and_lsu_are_different_engines():
     dma, lsu = _k(HW, "tma"), _k(HW, "lsu")
     # the vector path burns SM issue slots and stages through SMEM; the DMA engine does neither
-    assert sum(a.work.get("cuda", 0) for a in lsu.body) > 0
-    assert sum(a.work.get("cuda", 0) for a in dma.body) == 0
-    assert sum(a.work.get("smem", 0) for a in lsu.body) > sum(a.work.get("smem", 0) for a in dma.body)
-    assert backend.evaluate(lsu, HW).time_s > backend.evaluate(dma, HW).time_s
+    assert sum(a.work.get("cuda", 0) for a in lsu.trace.body) > 0
+    assert sum(a.work.get("cuda", 0) for a in dma.trace.body) == 0
+    assert sum(a.work.get("smem", 0) for a in lsu.trace.body) > sum(a.work.get("smem", 0) for a in dma.trace.body)
+    assert evaluate(lsu, HW).time_s > evaluate(dma, HW).time_s
     assert HW.path_is_dma("tma") and not HW.path_is_dma("lsu")
 
 
 def test_lsu_costs_registers_and_blocks_multicast():
     # staging registers reduce occupancy
-    r_dma, _ = occupancy(HW, 64 * 1024, 128 * 256 * 4, 384, extra_regs=0)
-    r_lsu, _ = occupancy(HW, 64 * 1024, 128 * 256 * 4, 384, extra_regs=16)
+    r_dma, _ = _core.occupancy(HW, 64 * 1024, 128 * 256 * 4, 384, extra_regs=0)
+    r_lsu, _ = _core.occupancy(HW, 64 * 1024, 128 * 256 * 4, 384, extra_regs=16)
     assert r_lsu <= r_dma
     # a cluster-multicast tile is illegal on a path that cannot multicast
     assert _k(HW, "lsu", cluster_m=2) is None
@@ -42,7 +50,7 @@ def test_mega_tile_staging_cuts_hbm_traffic():
     buf = with_buffer(HW, 4096, policy="pin", pin={"weight": 1.0})
     staged = buf.override({"memory.sram.stage": {"share_blocks": 8}})
     a, b = _k(buf), _k(staged)
-    assert sum(x.work.get("ddr", 0) for x in b.body) < sum(x.work.get("ddr", 0) for x in a.body)
+    assert sum(x.work.get("ddr", 0) for x in b.trace.body) < sum(x.work.get("ddr", 0) for x in a.trace.body)
     assert b.meta["stage_share"][1] > 1        # B panels shared along M
 
 
@@ -88,25 +96,25 @@ def test_every_unit_has_a_configurable_latency():
 
 
 def test_independent_latency_only_costs_fill_but_loop_carried_costs_throughput():
-    from tilesight.gpuTilingPerfHWModel.model.kernels.attention import lower_attention_decode
     slow_mma = HW.override({"compute.mma_latency_cycles": 512})
     a, b = _k(HW), _k(slow_mma)
-    ra, rb = backend.evaluate(a, HW), backend.evaluate(b, slow_mma)
+    ra, rb = evaluate(a, HW), evaluate(b, slow_mma)
     # a tile MMA is independent per iteration: more latency only lengthens the fill
     assert rb.breakdown["fill"] > ra.breakdown["fill"]
     assert abs(rb.breakdown["steady"] - ra.breakdown["steady"]) < 1e-9
+
     # the online-softmax chain in attention IS loop-carried: its latency hits the steady state
     def attn(cur_gpu_config):
-        k = lower_attention_decode(cur_gpu_config, "a", B=32, H=64, kv_heads=1, S=8192, d_qk=576, d_v=512,
-                                   v_in_k=True, tile=__import__("tilesight").gpuTilingPerfHWModel.model.kernels.tiles
-                                   .AttnTileConfig(block_m=64, block_n=64, stages=2, consumers=1))[0]
-        return backend.evaluate(k, cur_gpu_config)
+        k = _core.lower_attention_decode(cur_gpu_config, "a", B=32, H=64, kv_heads=1, S=8192, d_qk=576,
+                                         d_v=512, v_in_k=True,
+                                         tile=_core.AttnTile(block_m=64, block_n=64, stages=2, consumers=1))[0]
+        return evaluate(k, cur_gpu_config)
     slow_sfu = HW.override({"compute.sfu_latency_cycles": 4096})
     assert attn(slow_sfu).time_s > attn(HW).time_s
 
 
 def test_memory_map_allocates_every_layer_instance():
-    from tilesight.gpuTilingPerfHWModel.model.memmap import build_memory_map
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.memmap import build_memory_map
     m = ModelSpec.load("kimi_k2.hf")
     rc = RunConfig(phase="decode", batch=64, seq_len=4096, dp=8)
     mm = build_memory_map(m, rc, base=0x1000000)
@@ -124,7 +132,7 @@ def test_memory_map_allocates_every_layer_instance():
 
 
 def test_tile_addresses_follow_the_layout():
-    from tilesight.gpuTilingPerfHWModel.model.memmap import build_memory_map
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.memmap import build_memory_map
     mm = build_memory_map(ModelSpec.load("kimi_k2.hf"),
                           RunConfig(phase="decode", batch=64, seq_len=4096, dp=8), base=0)
     r = mm.find("experts_gate_up")
@@ -138,8 +146,7 @@ def test_trace_and_csv_carry_addresses():
     from tilesight.gpuTilingPerfHWModel.genResult.addressing import kernel_addr_fn
     from tilesight.gpuTilingPerfHWModel.genResult.timeline import cycle_csv, steady_timeline, trace_text
     t = TileConfig(bm=128, bn=256, bk=64, stages=4, cluster_m=2)
-    k = lower_gemm(HW, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
-                   compute_dtype="fp8", tile=t)[0]
+    k = _lower_gemm(HW, 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
     fn = kernel_addr_fn(HW, 4096, 4096, 7168, t, 1.0, 1.0, base=0x10000000)
     tl = steady_timeline(k, HW, addr_fn=fn)
     loads = [it for it in tl["steady"] if it["action"].startswith("load")]
@@ -196,17 +203,17 @@ def test_l2_blocks_and_outstanding_limits_are_enforced():
     fast = HW.override({"memory.outstanding.per_sm_lines": 2048})
     assert slow.outstanding_cap("ddr") < fast.outstanding_cap("ddr")
     assert abs(slow.outstanding_cap("ddr") - 64 * 128 / slow.unit_latency_s("ddr")) < 1e3
-    a = backend.evaluate(_k(slow), slow).time_s
-    b = backend.evaluate(_k(fast), fast).time_s
+    a = evaluate(_k(slow), slow).time_s
+    b = evaluate(_k(fast), fast).time_s
     assert a > b
 
 
 def test_dma_destination_changes_which_lanes_are_used():
     to_smem, to_l2, bypass = (_k(HW.override({"memory.dma.destination": d}))
                               for d in ("smem", "l2", "bypass"))
-    l2_of = lambda k: sum(a.work.get("l2", 0) for a in k.body)      # noqa: E731
+    l2_of = lambda k: sum(a.work.get("l2", 0) for a in k.trace.body)      # noqa: E731
     assert l2_of(bypass) < l2_of(to_smem) < l2_of(to_l2)
-    assert backend.evaluate(to_l2, HW).time_s > backend.evaluate(to_smem, HW).time_s
+    assert evaluate(to_l2, HW).time_s > evaluate(to_smem, HW).time_s
 
 
 def test_figure3_outputs_all_three_panels(tmp_path):
@@ -243,45 +250,43 @@ def test_sweeping_sms_scales_compute_with_it():
 
 
 def test_collectives_go_hierarchical_outside_the_fast_domain():
-    from tilesight.gpuTilingPerfHWModel.model.kernels.comm import all_to_all, allreduce
     d = int(HW.get("network.nvlink.domain_size"))
-    inside = allreduce(HW, "ar", 256e6, d)[0]
-    outside = allreduce(HW, "ar", 256e6, 2 * d)[0]
+    inside = _core.allreduce(HW, "ar", 256e6, d)[0]
+    outside = _core.allreduce(HW, "ar", 256e6, 2 * d)[0]
     assert "hierarchical" in outside.meta["algo"] and "hierarchical" not in inside.meta["algo"]
     # leaving the domain costs more, but nothing like a flat ring over the slow fabric
-    assert inside.fixed_time_s < outside.fixed_time_s < 3 * inside.fixed_time_s
+    assert inside.trace.fixed_time_s < outside.trace.fixed_time_s < 3 * inside.trace.fixed_time_s
     # and it keeps growing slowly with more nodes
-    big = allreduce(HW, "ar", 256e6, 9 * d)[0]
-    assert outside.fixed_time_s < big.fixed_time_s < 2 * outside.fixed_time_s
-    a2a = all_to_all(HW, "a2a", 256e6, 2 * d)[0]
+    big = _core.allreduce(HW, "ar", 256e6, 9 * d)[0]
+    assert outside.trace.fixed_time_s < big.trace.fixed_time_s < 2 * outside.trace.fixed_time_s
+    a2a = _core.all_to_all(HW, "a2a", 256e6, 2 * d)[0]
     assert "hierarchical" in a2a.meta["algo"] and a2a.meta["inter_s"] > 0
 
 
 def test_l2_is_simulated_deterministically_per_partition():
-    from tilesight.gpuTilingPerfHWModel.model.engine.cache_sim import simulate
     k = _k(HW)
-    sim = k.meta["l2_sim"]
     assert k.meta["l2_partitions"] == HW.get("memory.l2.partitions")
     assert 0 <= k.meta["l2_hit_rate"] <= 1
     # the model can say exactly what is resident, not just a probability
-    assert sum(len(p.resident) for p in sim.partitions) > 0
-    assert all(p.used <= p.capacity for p in sim.partitions)
+    assert sum(k.meta["l2_partition_tiles"]) > 0
+    assert all(u <= c for u, c in zip(k.meta["l2_partition_bytes"], k.meta["l2_partition_capacity"]))
     assert k.meta["l2_waves_simulated"] >= 1
     # deterministic: same inputs, same answer
     assert _k(HW).meta["l2_hit_rate"] == k.meta["l2_hit_rate"]
     # capacity actually binds: a tiny L2 evicts and misses more
     small = _k(HW.override({"memory.l2.effective_capacity_MB": 0.5}))
     assert small.meta["l2_hit_rate"] < k.meta["l2_hit_rate"]
-    assert sum(p.evictions for p in small.meta["l2_sim"].partitions) > 0
+    assert sum(small.meta["l2_partition_evictions"]) > 0
     # the address map decides the partition: hashing spreads the same tiles out
     hashed = _k(HW.override({"memory.addressing.l2.mode": "hash"}))
-    used_plain = sum(1 for p in sim.partitions if p.resident)
-    used_hash = sum(1 for p in hashed.meta["l2_sim"].partitions if p.resident)
+    used_plain = sum(1 for t in k.meta["l2_partition_tiles"] if t)
+    used_hash = sum(1 for t in hashed.meta["l2_partition_tiles"] if t)
     assert used_hash > used_plain
     # a pure LRU sanity case: 3 tiles into a 2-tile cache, cyclic -> always miss
-    r = simulate([1, 2, 3] * 4, [0, 4096, 8192] * 4, [4096] * 12, [0] * 12, 1,
-                 2 * 4096, 1, lambda a: 0, "lru")
-    assert r.hit_rate == 0.0
+    r = _core.cache_simulate([1, 2, 3] * 4, [0, 4096, 8192] * 4, [4096.0] * 12, [0] * 12, 1,
+                             capacity_bytes=2 * 4096, n_partitions=1, ports=1, granularity=1024,
+                             policy="lru")
+    assert r["hit_rate"] == 0.0
 
 
 def test_cross_wave_reuse_is_visible():
@@ -295,8 +300,8 @@ def test_cross_wave_reuse_is_visible():
 def test_queueing_inflates_latency_near_saturation():
     off = HW.override({"memory.queueing.coef": 0.0})
     on = HW.override({"memory.queueing.coef": 1.0})
-    a = backend.evaluate(_k(off), off).time_s
-    b = backend.evaluate(_k(on), on).time_s
+    a = evaluate(_k(off), off).time_s
+    b = evaluate(_k(on), on).time_s
     assert b > a                                    # queueing can only make it slower
     assert b < 1.5 * a                              # and is capped, not unbounded
 
@@ -341,16 +346,16 @@ def test_l1_is_a_modeled_level_only_for_paths_that_use_it():
     expect = (l1["capacity_KB"] - l1["smem_carveout_KB"]) * 1024 * l1.get("capacity_derate", 1.0) * l1["cluster_size"]
     assert abs(HW.l1_capacity_bytes - expect) < 1
     assert "l1" in [l.name for l in HW.lanes()]
-    dma = lower_gemm(HW, "g", 1024, 1024, 512, tile=TileConfig(64, 64, 64, load_path="tma"))[0]
-    lsu = lower_gemm(HW, "g", 1024, 1024, 512, tile=TileConfig(64, 64, 64, load_path="lsu"))[0]
+    dma = _lower_gemm(HW, 1024, 1024, 512, tile=TileConfig(64, 64, 64, load_path="tma"))[0]
+    lsu = _lower_gemm(HW, 1024, 1024, 512, tile=TileConfig(64, 64, 64, load_path="lsu"))[0]
     assert dma.meta["l1_miss"] is None                     # DMA writes SMEM directly
     assert lsu.meta["l1_miss"] is not None and all(0 <= m <= 1 for m in lsu.meta["l1_miss"])
     # an L1 hit does not reach the L2 datapath
-    l2_of = lambda k: sum(a.work.get("l2", 0) for a in k.body)   # noqa: E731
-    no_l1 = lower_gemm(HW.override({"memory.l1.cache_global_loads": False}), "g", 1024, 1024, 512,
-                       tile=TileConfig(64, 64, 64, load_path="lsu"))[0]
+    l2_of = lambda k: sum(a.work.get("l2", 0) for a in k.trace.body)   # noqa: E731
+    no_l1 = _lower_gemm(HW.override({"memory.l1.cache_global_loads": False}), 1024, 1024, 512,
+                        tile=TileConfig(64, 64, 64, load_path="lsu"))[0]
     assert l2_of(lsu) < l2_of(no_l1)
-    assert any(a.work.get("l1", 0) > 0 for a in lsu.body)
+    assert any(a.work.get("l1", 0) > 0 for a in lsu.trace.body)
 
 
 def test_lossless_mode_turns_every_modelled_loss_off():
@@ -359,8 +364,8 @@ def test_lossless_mode_turns_every_modelled_loss_off():
     assert ideal.get("memory.queueing.coef") == 0.0
     assert ideal.get("memory.l2.capacity_derate") == 1.0
     assert ideal.outstanding_cap("ddr") == float("inf")
-    fast = backend.evaluate(_k(ideal), ideal).time_s
-    real = backend.evaluate(_k(HW), HW).time_s
+    fast = evaluate(_k(ideal), ideal).time_s
+    real = evaluate(_k(HW), HW).time_s
     assert fast < real                       # the ideal machine is never slower
     assert fast > real * 0.5                 # but the losses are a correction, not the model
 
@@ -372,13 +377,22 @@ def test_config_is_the_only_interface_between_gpu_and_model():
     # 1. every shipped preset validates against the schema
     for name in ("b300", "b200", "h200", "mi300x", "mi325x", "mi355x", "mi450"):
         assert HardwareSpec.load(name).validate() == [], name
-    # 2. the model never names a device or a vendor
+    # 2. the model (never a device/vendor name) — the shape-only lowering that stays Python
+    # (interfaceAndRun/lower.py, attention_blocks.py, memmap.py — see CLAUDE.md) plus model/,
+    # and separately gpu_top's C++ below. hardware_spec.py/schema.py/slice_config.py legitimately
+    # name vendors in doc comments (they describe real hardware fields) so are not scanned.
     root = pathlib.Path(schema.__file__).parent.parent
-    for sub in ("engine", "kernels", "model"):
-        for f in (root / sub).rglob("*.py"):
-            code = re.sub(r'(""".*?"""|#[^\n]*)', "", f.read_text(), flags=re.S)
-            for word in ("b300", "h200", "mi355x", "blackwell", "hopper", "cdna"):
-                assert word not in code.lower(), f"{f.name} hard-codes {word}"
+    py_files = list((root / "model").rglob("*.py"))
+    for name in ("lower.py", "attention_blocks.py", "memmap.py"):
+        py_files.append(root / "interfaceAndRun" / name)
+    for f in py_files:
+        code = re.sub(r'(""".*?"""|#[^\n]*)', "", f.read_text(), flags=re.S)
+        for word in ("b300", "h200", "mi355x", "blackwell", "hopper", "cdna"):
+            assert word not in code.lower(), f"{f.name} hard-codes {word}"
+    for f in (root / "model" / "gpu_top").glob("*.cpp"):
+        code = re.sub(r"(/\*.*?\*/|//[^\n]*)", "", f.read_text(), flags=re.S)
+        for word in ("b300", "h200", "mi355x", "blackwell", "hopper", "cdna"):
+            assert word not in code.lower(), f"{f.name} hard-codes {word}"
     # 3. defaults live in the schema, not at the call sites
     assert HardwareSpec({"name": "x"}).get("occupancy.max_blocks_per_sm") == \
         schema.default_for("occupancy.max_blocks_per_sm")

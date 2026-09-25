@@ -10,7 +10,7 @@ the model may see — 99 fields in 15 sections, each with a type, unit, default,
 Three rules keep the boundary clean, and a test enforces all three:
 1. the model asks `HardwareSpec.get(path)` and never carries a literal default — absent fields
    resolve to the schema default, so hardware knowledge lives in exactly one file;
-2. no file under `engine/`, `kernels/` or `model/` may name a device, vendor or architecture
+2. no file under `model/` (or `interfaceAndRun/lower.py`, `attention_blocks.py`, `memmap.py`) may name a device, vendor or architecture
    (`b300`, `hopper`, `cdna` …) outside comments;
 3. every shipped preset must pass `HardwareSpec.validate()` (unknown field, wrong type, missing
    required field), which is also what `tilesight config --validate <file>` runs for a new part.
@@ -20,19 +20,19 @@ adding a field to the schema and using it in the model.
 
 ## 1. Layers
 ```
-ModelSpec (blocks: mla/gqa/mlp/moe/norm/raw)      model/spec.py      <- user gives layer sizes / HF config
+ModelSpec (blocks: mla/gqa/mlp/moe/norm/raw)      interfaceAndRun/model_spec.py  <- user gives layer sizes / HF config
    │  RunConfig (phase, batch, seq, tp/dp/ep, dtypes)
    ▼
-Ops for one GPU (gemm, attn_decode, attn_prefill, elementwise, allreduce, a2a)   model/lower.py
+Ops for one GPU (gemm, attn_decode, attn_prefill, elementwise, allreduce, a2a)   interfaceAndRun/lower.py
    │  tile policy (GPU config, gpuTilingPerfHWModel/interfaceAndRun/schema.py's compute.tile_policy.*):
-   │  fixed | per-op override (fnmatch) | auto search (kernels/tiles.py)
+   │  fixed | per-op override (fnmatch) | auto search (gpu_top's tile search spaces)
    ▼
-Kernels = tile execution plans lowered to numbers (ir/kernel.py)   kernels/*.py
+Kernels = tile execution plans lowered to numbers, in C++          model/gpu_top/*.cpp
    │  HardwareSpec -> lanes
    ▼
-Engine (reference.py == C++ core) -> KernelResult (time, limiter, util)
+Engine (model/shader_core, model/shader_slice) -> KernelResult (time, limiter, util)
    ▼
-ModelReport: step time, tok/s/GPU, per-op table, limiter mix, memory   model/runner.py
+ModelReport: step time, tok/s/GPU, per-op table, limiter mix, memory   interfaceAndRun/runner.py
 DSE: sweep / required_value over any hardware field                      dse/sweep.py
 ```
 
@@ -116,7 +116,7 @@ latency<-x, launch-overhead) and list the top resource:tensor pairs.
 
 ## 4. L2 model — deterministic tile-level simulation (default) or SDCM
 The paper's SDCM answers "how likely is a hit at this reuse distance". For a hardware-managed
-L2 that is the wrong question: what is resident is decidable, so `engine/cache_sim.py` decides
+L2 that is the wrong question: what is resident is decidable, so `model/common/cache/cache_sim.cpp` decides
 it. The tile is the atom (no cache lines). `memory.l2.partitions` independent partitions each
 hold whole tiles and run an explicit policy (`memory.l2.policy`: `lru` | `fifo` | `mru`); a tile
 goes to the partition **its address maps to** (`report.addressing.AddressMap`), so the layout /
@@ -159,24 +159,14 @@ TMA bypasses L1 entirely. There is an `l1` lane for its bandwidth.
 **The on-chip buffer is not a cache**: it is explicitly managed, so its residency is a
 deterministic capacity share per tensor class (`resident_frac`), never a probability.
 
-The SDCM path below is kept for comparison (`memory.l2.model: sdcm`) and is still what
-`engine/cache.py` implements.
-
-## 4b. SDCM (paper §3.5, Eqs. 6–10)
-Each lowering emits the tile access sequence of the **first wave** for up to 4 sampled
-K-steps, in issue order (blocks progress in lock-step, swizzled raster order). Keys
-encode (tensor, reuse coordinates) exactly as Eq. 6 (reuse dims dropped).
-- `D_T` = distinct tiles between consecutive uses of the same tile (Fenwick tree, exact).
-- `P(hit | D_T) = P(X ≤ A−1)`, `X ~ Bin(D_T, A/B_T)`, A = assoc, B_T = effective capacity
-  / avg tile bytes. Exact binomial for D_T ≤ 256, else Gaussian with Zelen–Severo Φ and
-  a +0.5 continuity correction (deviation: the paper writes 1−Q(|A−1−μ|/σ)).
-- Compulsory first touches miss. Miss ratio per stream sets `ddr` bytes of each load;
-  all load bytes go through `l2`.
-- Load latency = path issue latency + hit·L2 latency + miss·DDR latency.
-Not yet: cross-wave reuse (B1), L1.5 / per-die cascade (B2), D_T perturbation (A6).
+The paper's probabilistic SDCM model (§3.5, Eqs. 6–10: reuse-distance -> hit probability via a
+binomial/Gaussian approximation) answered a different, weaker question ("how likely is a hit")
+and was dropped from the port — it was dead code even before this rewrite (nothing in the real
+simulation path called it, only its own tests did); the deterministic tile-level simulation
+above is what every lowering actually uses.
 
 ## 5. Kernel lowerings
-### 5.1 GEMM (`kernels/gemm.py`)
+### 5.1 GEMM (`model/gpu_top/gpu_top.cpp`, `lower_gemm`)
 `C[b] = A[b]·B[b]`, grid `batch·⌈M/bm⌉·⌈N/bn⌉·split_k`, `iters = ⌈⌈K/bk⌉/split_k⌉`.
 - stages: explicit or max fitting SMEM (≤8); resident = min over max_blocks, SMEM, threads,
   registers (GPR), TMEM; the report shows `resident/limiter`, all binding resources joined
@@ -191,14 +181,14 @@ Not yet: cross-wave reuse (B1), L1.5 / per-die cascade (B2), D_T perturbation (A
 - epilogue: TMEM accumulator read + convert, store C (fp32 partials if split-K, followed
   by a reduce kernel).
 - low-precision datapath ⇒ activations are quantized to it (quant kernel cost: TASK E5).
-### 5.2 Attention (`kernels/attention.py`)
+### 5.2 Attention (`model/gpu_top/gpu_top.cpp`, `lower_attention_decode`/`lower_attention_prefill`)
 - decode: block = (batch, kv_head, head-group of ≤block_m heads, kv-split); per KV tile:
   load K(/V) → gemm_qk → softmax (SFU exp + CUDA + TMEM S/P traffic) → gemm_pv;
   qk/softmax/pv are `recurrent`; `consumers` ping-pong warpgroups hide the chain.
   MLA absorbed: `d_qk = kv_lora+rope`, `d_v = kv_lora`, one kv head, `v_in_k`.
   auto split-KV fills the machine; a combine kernel follows.
 - prefill: causal FA-style; iterations averaged over q-tiles (per-block iters: TASK A3).
-### 5.2b Attention families and implementations (`model/attention_blocks.py`)
+### 5.2b Attention families and implementations (`interfaceAndRun/attention_blocks.py`)
 Three block types, all with `impl: flash | naive` (default `RunConfig.attn_impl`),
 `causal`, `sliding_window`:
 
@@ -226,7 +216,7 @@ activation-memory OVERFLOW and a `ddr`-bound softmax.
 
 ### 5.3 Elementwise
 bytes in/out + CUDA flops + SFU ops, 32 KB chunks per block, LSU path.
-### 5.4 Collectives (`kernels/comm.py`, Eq. 11)
+### 5.4 Collectives (`model/gpu_top/gpu_top.cpp`, `allreduce`/`all_to_all`, Eq. 11)
 Flat inside the fast domain, **hierarchical** beyond it: a group larger than
 `network.nvlink.domain_size` reduce-scatters inside each node, all-reduces the 1/d shards
 between nodes and all-gathers inside the node again; all-to-all only sends the
@@ -236,7 +226,7 @@ allreduce: min(ring `2(p−1)α + 2(p−1)/p·S/β`, recursive doubling `⌈log2
 all-to-all: `⌈log2 p⌉α + S·(p−1)/p/β`. NVLink inside `domain_size`, scale-out NIC beyond.
 `RunConfig.comm_overlap` hides a fraction (placeholder for a real overlap scheduler, E2).
 
-## 6. Model layer semantics (`model/lower.py`)
+## 6. Model layer semantics (`interfaceAndRun/lower.py`)
 - Attention: `dp` groups of `tp` GPUs; heads split by tp; tokens per attention rank
   `T = batch/dp` (decode) or `batch/dp·seq` (prefill). MLA latent KV is replicated across
   tp ranks (not head-sharded).
@@ -269,7 +259,7 @@ Config: `prompt_len` (P), `output_len` (O), `page_size`, `kv_reserve: peak|curre
   max(prefill act, decode act) + reserve (conservative).
 - max concurrent requests/rank = free HBM / per-request KV (peak: P+O; current: P+O/2).
 
-## 7c. Timeline view (`report/timeline.py`) — the paper's Figure 3(e)
+## 7c. Timeline view (`genResult/timeline.py`) — the paper's Figure 3(e)
 The engine says how long a round is and what bounds it; `steady_timeline` reconstructs a
 concrete schedule consistent with that, to render (SVG in the web UI, ASCII in the CLI):
 actions are walked in topological order and start when their dependencies are done and

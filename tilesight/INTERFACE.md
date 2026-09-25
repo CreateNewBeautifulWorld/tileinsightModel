@@ -1,8 +1,9 @@
 # Interface
 
 Two inputs, two schemas, one rule: **the model only ever sees config.** No device name, no
-vendor assumption and no default value lives inside `gpuTilingPerfHWModel/model/engine/`,
-`gpuTilingPerfHWModel/model/kernels/` or `gpuTilingPerfHWModel/model/` — a test enforces it.
+vendor assumption and no default value lives inside `gpuTilingPerfHWModel/model/` (the C++
+engine) or the shape-only lowering in `gpuTilingPerfHWModel/interfaceAndRun/lower.py` /
+`attention_blocks.py` / `memmap.py` — a test enforces it.
 
 `gpuTilingPerfHWModel/` is the whole model, standalone (no b200/Kimi specifics inside it —
 those are one level up, in `gpuPresets/` and `modelPresets/`), split into three by role:
@@ -127,6 +128,24 @@ model is running. Set it via `--set compute.tile_policy.gemm=...` (CLI) or `hw_o
 (web/API), same as any other hardware override.
 
 ## How the model is organised
+
+`gpuTilingPerfHWModel/model/` is a pure C++ nanobind extension (`tilesight._core`) — five
+folders, one per hardware block, plus a shared cache simulator:
+
+```
+model/gpu_top/          orchestrator: lowering (shape+tile -> a tile execution plan) and the
+                         wave-decomposition scheduler, per op kind (gemm, attention, comm)
+model/shader_core/       one core's per-lane time; the steady-state K-loop round formula
+model/shader_slice/      grid -> waves; the slice-shared L1
+model/on_chip_buffer/    the optional staging SRAM between the shader slices and the memory slices
+model/memory_slice/      the L2 port + DMA port + HBM behind it
+model/common/cache/       the deterministic tile-level cache simulation shared by the two above
+```
+
+`interfaceAndRun/runner.py` is the only Python caller of `tilesight._core`; it also holds the
+shape-only "block -> op" lowering (`interfaceAndRun/lower.py`, `attention_blocks.py`,
+`memmap.py`) — pure shape/dtype arithmetic over `ModelSpec`/`RunConfig` that never touches
+`HardwareSpec`, so it stays alongside the two config schemas rather than in the C++ engine.
 
 The model mirrors the config: three blocks, and a shader slice built from one core.
 

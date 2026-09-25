@@ -317,7 +317,7 @@ def main(argv=None):
             print(f"written to {a.csv}")
         return
     if a.cmd == "memmap":
-        from tilesight.gpuTilingPerfHWModel.model.memmap import build_memory_map
+        from tilesight.gpuTilingPerfHWModel.interfaceAndRun.memmap import build_memory_map
         mm = build_memory_map(ModelSpec.load(a.model),
                               RunConfig(phase=a.phase, batch=a.batch, seq_len=a.seq, tp=a.tp, dp=a.dp),
                               base=int(a.base, 0))
@@ -398,7 +398,8 @@ def main(argv=None):
         addr_fn = None
         if a.kernel in ("gemm", "grouped_gemm"):
             from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES as _DT
-            from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig as _TC
+            import tilesight._core as _core_mod
+            _TC = _core_mod.GemmTile
             from tilesight.gpuTilingPerfHWModel.genResult.addressing import kernel_addr_fn
             _sh = json.loads(a.shape)
             _t = _TC(**json.loads(a.tile)) if a.tile != "auto" else \
@@ -430,7 +431,7 @@ def main(argv=None):
             print(f"\ntrace written to {a.trace_out} ({len(txt.splitlines())} lines)")
         if a.addr and a.kernel in ("gemm", "grouped_gemm"):
             from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES
-            from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+            from tilesight._core import GemmTile as TileConfig
             from tilesight.gpuTilingPerfHWModel.genResult.addressing import analyze_gemm
             sh = json.loads(a.shape)
             tcfg = TileConfig(**json.loads(a.tile)) if a.tile != "auto" else \

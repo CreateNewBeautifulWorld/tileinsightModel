@@ -1,14 +1,20 @@
-"""Engine invariants (backend-agnostic)."""
+"""Engine invariants (the C++ core is the only engine now — no python/cpp parity to check)."""
 import math
 
-from tilesight import HardwareSpec
-from tilesight.gpuTilingPerfHWModel.model.engine import reference
-from tilesight.gpuTilingPerfHWModel.model.engine.cache import hit_prob, expected_misses
-from tilesight.gpuTilingPerfHWModel.model.ir.kernel import Action, Kernel
-from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
-from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+from tilesight import HardwareSpec, _core
 
 HW = HardwareSpec.load("b300")
+
+TileConfig = _core.GemmTile
+
+
+def lower_gemm(cur_gpu_config, name, M, N, K, **kw):
+    kw.setdefault("tile", _core.GemmTile())
+    return _core.lower_gemm(cur_gpu_config, name, M, N, K, **kw)
+
+
+def evaluate(k, hw):
+    return _core.evaluate(hw, k)
 
 
 def test_ddr_bound_decode_gemm_hits_bandwidth():
@@ -16,7 +22,7 @@ def test_ddr_bound_decode_gemm_hits_bandwidth():
     N, K = 16384, 7168
     ks = lower_gemm(HW, "g", 1, N, K, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
                     tile=TileConfig(bm=64, bn=64, bk=128))
-    t = sum(reference.evaluate(k, HW).time_s for k in ks)
+    t = sum(evaluate(k, HW).time_s for k in ks)
     ideal = N * K / (8.0e12 * 0.88)
     assert ideal <= t < 1.6 * ideal
 
@@ -25,7 +31,7 @@ def test_large_gemm_is_tc_bound():
     M = N = K = 8192
     ks = lower_gemm(HW, "g", M, N, K, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
                     tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2, cta_pair=True))
-    r = reference.evaluate(ks[0], HW)
+    r = evaluate(ks[0], HW)
     ideal = 2 * M * N * K / (4500e12 * 0.92)
     assert r.bottleneck == "tc"
     assert ideal <= r.time_s < 1.25 * ideal
@@ -36,34 +42,21 @@ def test_more_ddr_bw_never_slower():
     for bw in (4, 8, 16):
         h = HW.override({"memory.ddr.bandwidth_TBps": bw})
         ks = lower_gemm(h, "g", 16, 7168, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8")
-        t = sum(reference.evaluate(k, h).time_s for k in ks)
+        t = sum(evaluate(k, h).time_s for k in ks)
         assert t <= prev + 1e-15
         prev = t
 
 
 def test_recurrence_limits_serial_chain():
-    body = [Action("a", {"tc": 1e-6}, recurrent=True), Action("b", {"sfu": 1e-6}, [0], recurrent=True)]
-    k1 = Kernel("k", "attention", 160, 10, 2, 1, body, consumers=1)
-    k2 = Kernel("k", "attention", 160, 10, 2, 1, body, consumers=2)
-    t1, t2 = reference.evaluate(k1, HW), reference.evaluate(k2, HW)
+    body = [_core.TraceAction("a", {"tc": 1e-6}, recurrent=True),
+            _core.TraceAction("b", {"sfu": 1e-6}, [0], recurrent=True)]
+    k1 = _core.LoweredKernel(_core.TraceKernel("k", "attention", 160, 10, 2, 1, body, consumers=1))
+    k2 = _core.LoweredKernel(_core.TraceKernel("k", "attention", 160, 10, 2, 1, body, consumers=2))
+    t1, t2 = evaluate(k1, HW), evaluate(k2, HW)
     assert t1.bottleneck == "latency" and t2.time_s < t1.time_s
 
 
 def test_tail_wave_counted():
-    body = [Action("a", {"tc": 1e-6})]
-    k = Kernel("k", "gemm", HW.sms + 1, 1, 2, 1, body)
-    assert reference.evaluate(k, HW).waves == 2
-
-
-def test_hit_prob_limits():
-    assert hit_prob(0, 16, 1000) == 1.0
-    assert hit_prob(100000, 16, 1000) < 1e-6
-    assert hit_prob(500, 16, 1000) > 0.99
-    # binomial/gaussian branches agree near the switch point
-    assert abs(hit_prob(256, 16, 256) - hit_prob(257, 16, 256)) < 0.05
-
-
-def test_reuse_within_capacity_hits():
-    keys = list(range(50)) * 3
-    (m,) = expected_misses(keys, [0] * len(keys), 1, 16, 10000)
-    assert abs(m - 50) < 1e-6          # only compulsory misses
+    body = [_core.TraceAction("a", {"tc": 1e-6})]
+    k = _core.LoweredKernel(_core.TraceKernel("k", "gemm", HW.sms + 1, 1, 2, 1, body))
+    assert evaluate(k, HW).waves == 2

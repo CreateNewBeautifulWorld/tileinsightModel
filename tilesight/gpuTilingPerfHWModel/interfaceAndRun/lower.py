@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES, WEIGHT_ONLY
-from tilesight.gpuTilingPerfHWModel.model.attention_blocks import lower_mha_gqa, lower_mla
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.attention_blocks import lower_mha_gqa, lower_mla
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.model_spec import ModelSpec
 

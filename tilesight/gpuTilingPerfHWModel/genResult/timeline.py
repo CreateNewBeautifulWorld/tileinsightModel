@@ -18,18 +18,51 @@ from __future__ import annotations
 
 import math
 
-from tilesight.gpuTilingPerfHWModel.model.engine.reference import _longest_path, _node_w, _u
+from tilesight import _core
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import HardwareSpec
-from tilesight.gpuTilingPerfHWModel.model.ir.kernel import Kernel
+
+Kernel = _core.LoweredKernel
+
+
+# Small local re-implementation of the round-formula pieces (gmem's per-core fair share, the
+# node-weight / critical-path DAG walk) for reconstructing a concrete schedule (Figure 3(e))
+# from a TraceKernel. Report-only code — the model's own execution path runs the same formula
+# in C++ (shader_core::lane_time / node_weight / critical_path); this mirrors it in Python
+# purely so genResult can draw a timeline without a second FFI round trip per action.
+def _u(a, lane, active: int) -> float:
+    work = a.work.get(lane.name, 0.0)
+    if work == 0.0:
+        return 0.0
+    if not lane.shared:
+        return work
+    rate = min(lane.total_rate / max(1, active), lane.per_sm_cap)
+    return work / rate
+
+
+def _node_w(a, lanes, active: int, qf: float = 1.0) -> float:
+    return max((_u(a, l, active) for l in lanes), default=0.0) + a.latency_s * qf
+
+
+def _longest_path(actions, weights) -> float:
+    n = len(actions)
+    best = [0.0] * n
+    for i, a in enumerate(actions):
+        start = 0.0
+        for d in a.deps:
+            if best[d] > start:
+                start = best[d]
+        best[i] = start + weights[i]
+    return max(best) if n else 0.0
 
 
 def steady_timeline(k: Kernel, cur_gpu_config: HardwareSpec, max_rounds: int = 0, addr_fn=None) -> dict:
     """max_rounds = 0 -> stages+1 rounds, so a load and the MMA that consumes it both appear."""
-    max_rounds = max_rounds or min(8, k.stages + 1)
+    t = k.trace
+    max_rounds = max_rounds or min(8, t.stages + 1)
     lanes = cur_gpu_config.lanes()
-    resident = max(1, k.resident)
+    resident = max(1, t.resident)
     conc = cur_gpu_config.sms * resident
-    blocks = min(k.num_blocks, conc) or 1
+    blocks = min(t.num_blocks, conc) or 1
     active = min(cur_gpu_config.sms, math.ceil(blocks / resident))
     bps = math.ceil(blocks / active)
 
@@ -54,28 +87,28 @@ def steady_timeline(k: Kernel, cur_gpu_config: HardwareSpec, max_rounds: int = 0
                           "lanes": {n: v for n, v in use.items()}})
         return items, (max(end.values()) if end else 0.0)
 
-    body_items, makespan = sched(k.body, prefetch=k.stages > 1)
+    body_items, makespan = sched(t.body, prefetch=t.stages > 1)
     # engine's numbers for the same wave
-    sums = {l.name: bps * sum(_u(a, l, active) for a in k.body) for l in lanes}
+    sums = {l.name: bps * sum(_u(a, l, active) for a in t.body) for l in lanes}
     lane, rb = max(sums.items(), key=lambda kv: kv[1])
-    w = [_node_w(a, lanes, active) for a in k.body]
-    cp = _longest_path(k.body, w)
-    cp_rec = _longest_path(k.body, [x if a.recurrent else 0.0 for a, x in zip(k.body, w)])
-    lat_bound = max(cp / max(1, k.stages), cp_rec / max(1, k.consumers))
+    w = [_node_w(a, lanes, active) for a in t.body]
+    cp = _longest_path(t.body, w)
+    cp_rec = _longest_path(t.body, [x if a.recurrent else 0.0 for a, x in zip(t.body, w)])
+    lat_bound = max(cp / max(1, t.stages), cp_rec / max(1, t.consumers))
     round_s = max(rb, lat_bound)
     limiter = lane if rb >= lat_bound else "latency"
 
-    rounds = min(max_rounds, max(1, k.iters))
+    rounds = min(max_rounds, max(1, t.iters))
     steady = []
     for r in range(rounds):
         for it in body_items:
             steady.append({**it, "start": it["start"] + r * round_s, "end": it["end"] + r * round_s,
                            "round": r,
                            # loads are prefetches for a later iteration (multi-buffering)
-                           "iteration": r + k.stages - 1 if it["action"].startswith("load") else r})
-    pro, pro_len = sched(k.prologue)
-    epi, epi_len = sched(k.epilogue)
-    full, tail = divmod(k.num_blocks, conc)
+                           "iteration": r + t.stages - 1 if it["action"].startswith("load") else r})
+    pro, pro_len = sched(t.prologue)
+    epi, epi_len = sched(t.epilogue)
+    full, tail = divmod(t.num_blocks, conc)
     clock = cur_gpu_config.clock_hz
     if addr_fn is not None:                       # attach the tile address each action touches
         for it in body_items + steady + pro + epi:
@@ -92,16 +125,16 @@ def steady_timeline(k: Kernel, cur_gpu_config: HardwareSpec, max_rounds: int = 0
         "lanes": [l.name for l in lanes if any(l.name in it["lanes"] for it in body_items + pro + epi)],
         "prologue": pro, "steady": steady, "epilogue": epi,
         "round_s": round_s, "makespan_s": makespan, "rounds_shown": rounds,
-        "iters": k.iters, "stages": k.stages, "consumers": k.consumers,
+        "iters": t.iters, "stages": t.stages, "consumers": t.consumers,
         "resident": resident, "blocks_per_sm": bps, "active_sms": active,
         # how the grid maps onto the machine (paper §3.4: WaveDecompose; one representative SM
         # is modeled, waves are aggregated, the tail wave gets a bigger share of L2/DDR)
-        "num_blocks": k.num_blocks, "sms": cur_gpu_config.sms, "full_waves": full,
+        "num_blocks": t.num_blocks, "sms": cur_gpu_config.sms, "full_waves": full,
         "tail_blocks": tail, "tail_active_sms": min(cur_gpu_config.sms, math.ceil(tail / resident)) if tail else 0,
         "limiter": limiter, "resource_bound_s": rb, "latency_bound_s": lat_bound,
         "cp_s": cp, "cp_recurrent_s": cp_rec,
         "prologue_s": pro_len, "epilogue_s": epi_len,
-        "total_s": pro_len + max(0.0, cp - round_s) + k.iters * round_s + epi_len,
+        "total_s": pro_len + max(0.0, cp - round_s) + t.iters * round_s + epi_len,
     }
 
 

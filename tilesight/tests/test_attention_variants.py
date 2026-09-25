@@ -1,6 +1,6 @@
 """MHA / GQA / MLA configs, flash vs naive, sliding window, per-block overrides."""
 from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.gpuTilingPerfHWModel.model.lower import lower_model
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.lower import lower_model
 from tilesight.gpuTilingPerfHWModel.model.memory import kv_bytes_per_token
 
 HW = HardwareSpec.load("b300")

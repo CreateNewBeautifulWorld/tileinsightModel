@@ -55,8 +55,9 @@ def test_arch_diagram_comes_from_the_config():
 
 
 def test_pdf_report(tmp_path):
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
-    from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+    from tilesight import _core
+    lower_gemm = _core.lower_gemm
+    TileConfig = _core.GemmTile
     from tilesight.gpuTilingPerfHWModel.genResult.pdfreport import unit_groups, write_pdf
     ks = lower_gemm(HW, "gemm", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
                     compute_dtype="fp8", tile=TileConfig(128, 256, 64))
@@ -74,8 +75,9 @@ def test_pdf_report(tmp_path):
 
 def test_excel_columns_are_grouped_by_unit(tmp_path):
     from openpyxl import load_workbook
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
-    from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+    from tilesight import _core
+    lower_gemm = _core.lower_gemm
+    TileConfig = _core.GemmTile
     from tilesight.gpuTilingPerfHWModel.genResult.excel import write_excel
     from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline
     k = lower_gemm(HW, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
@@ -277,17 +279,17 @@ def test_flash_attention_is_a_choice_with_consequences():
 
 
 def test_buffer_sits_between_the_slices_and_l2_behind_a_switch():
+    from tilesight import _core
     from tilesight.gpuTilingPerfHWModel.model.dse.buffer import with_buffer
-    from tilesight.gpuTilingPerfHWModel.model.engine import backend
-    from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
-    from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import TileConfig
+    lower_gemm = _core.lower_gemm
+    TileConfig = _core.GemmTile
     tile = TileConfig(bm=64, bn=128, bk=64)
     plain = lower_gemm(HW, "g", 8, 16384, 7168, a_dtype="fp8", b_dtype="fp8",
                        compute_dtype="fp8", tile=tile)[0]
     buf_hw = with_buffer(HW, 64 * 1024, policy="pin", pin={"weight": 1.0}, prefetch=True)
     buf = lower_gemm(buf_hw, "g", 8, 16384, 7168, a_dtype="fp8", b_dtype="fp8",
                      compute_dtype="fp8", tile=tile)[0]
-    w = lambda k, lane: sum(a.work.get(lane, 0) for a in k.body)     # noqa: E731
+    w = lambda k, lane: sum(a.work.get(lane, 0) for a in k.trace.body)     # noqa: E731
     # a tile answered by the buffer crosses the switch and touches neither L2 nor HBM
     assert w(buf, "switch") > 0 and w(buf, "sram") == w(buf, "switch")
     assert w(buf, "ddr") < w(plain, "ddr") and w(buf, "l2") < w(plain, "l2")
@@ -299,10 +301,10 @@ def test_buffer_sits_between_the_slices_and_l2_behind_a_switch():
     # and it can be the bottleneck on its own
     narrow = buf_hw.override({"memory.sram.switch_TBps": 0.5})
     wide = buf_hw.override({"memory.sram.switch_TBps": 40.0})
-    tn = backend.evaluate(lower_gemm(narrow, "g", 8, 16384, 7168, a_dtype="fp8", b_dtype="fp8",
-                                     compute_dtype="fp8", tile=tile)[0], narrow).time_s
-    tw = backend.evaluate(lower_gemm(wide, "g", 8, 16384, 7168, a_dtype="fp8", b_dtype="fp8",
-                                     compute_dtype="fp8", tile=tile)[0], wide).time_s
+    tn = _core.evaluate(narrow, lower_gemm(narrow, "g", 8, 16384, 7168, a_dtype="fp8", b_dtype="fp8",
+                                     compute_dtype="fp8", tile=tile)[0]).time_s
+    tw = _core.evaluate(wide, lower_gemm(wide, "g", 8, 16384, 7168, a_dtype="fp8", b_dtype="fp8",
+                                     compute_dtype="fp8", tile=tile)[0]).time_s
     assert tn > tw
 
 

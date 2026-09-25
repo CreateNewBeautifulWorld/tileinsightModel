@@ -26,12 +26,9 @@ from dataclasses import asdict, fields
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from tilesight import _core
 from tilesight.gpuTilingPerfHWModel.model.dse.sweep import required_value, sweep
-from tilesight.gpuTilingPerfHWModel.model.engine import backend
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DTYPE_BYTES
-from tilesight.gpuTilingPerfHWModel.model.kernels.attention import lower_attention_decode, lower_attention_prefill
-from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_elementwise, lower_gemm
-from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import AttnTileConfig, TileConfig, attn_search_space, gemm_search_space
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import DB_DIR, HardwareSpec
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.request import run_request
 from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
@@ -57,20 +54,17 @@ def _top_kernels(rep, cur_gpu_config, n: int = 3):
         if o.op.kind not in ("gemm", "attn_decode", "attn_prefill"):
             continue
         try:
-            from tilesight.gpuTilingPerfHWModel.model.kernels.attention import lower_attention_decode, lower_attention_prefill
-            from tilesight.gpuTilingPerfHWModel.model.kernels.gemm import lower_gemm
-            from tilesight.gpuTilingPerfHWModel.model.kernels.tiles import AttnTileConfig, TileConfig
             p = o.op.p
             tile_s = o.tile.split("/")[0]
             if o.op.kind == "gemm":
                 bm, bn, bk = (int(x) for x in tile_s.split("x"))
-                ks = lower_gemm(cur_gpu_config, o.op.name, p["M"], p["N"], p["K"], batch=p["batch"],
-                                a_dtype=p["a_dtype"], b_dtype=p["b_dtype"], c_dtype=p["c_dtype"],
-                                compute_dtype=p["compute_dtype"], tile=TileConfig(bm, bn, bk))
+                ks = _core.lower_gemm(cur_gpu_config, o.op.name, p["M"], p["N"], p["K"], batch=p["batch"],
+                                      a_dtype=p["a_dtype"], b_dtype=p["b_dtype"], c_dtype=p["c_dtype"],
+                                      compute_dtype=p["compute_dtype"], tile=_core.GemmTile(bm, bn, bk))
             else:
-                fn = lower_attention_decode if o.op.kind == "attn_decode" else lower_attention_prefill
+                fn = _core.lower_attention_decode if o.op.kind == "attn_decode" else _core.lower_attention_prefill
                 ks = fn(cur_gpu_config, o.op.name, B=p["B"], H=p["H"], kv_heads=p["kv_heads"], S=p["S"],
-                        d_qk=p["d_qk"], d_v=p["d_v"], tile=AttnTileConfig(),
+                        d_qk=p["d_qk"], d_v=p["d_v"], tile=_core.AttnTile(),
                         **({"v_in_k": p["v_in_k"]} if o.op.kind == "attn_decode" else {}))
             if ks:
                 out.append(ks[0])
@@ -205,47 +199,47 @@ def _kernel_candidates(cur_gpu_config: HardwareSpec, k: dict, progress=None):
         batch = gi("experts", 1) if kind == "grouped_gemm" else gi("batch", 1)
         a, b = k.get("a_dtype", "fp8"), k.get("b_dtype", "fp8")
         comp = k.get("compute_dtype", "fp8")
-        tiles = [TileConfig(**json.loads(fixed))] if fixed != "auto" else gemm_search_space(M, N, K)
+        tiles = [_core.GemmTile(**json.loads(fixed))] if fixed != "auto" else _core.gemm_search_space(M, N, K)
         names = ("act", "expert_weight" if kind == "grouped_gemm" else "weight", "out")
         flops = 2.0 * M * N * K * batch
         bytes_min = (M * K * DTYPE_BYTES[a] + K * N * DTYPE_BYTES[b] + M * N * 2) * batch
         for i, t in enumerate(tiles):
             if progress:
-                progress(i, len(tiles), f"tile {t.short()}")
-            ks = lower_gemm(cur_gpu_config, "k", M, N, K, batch=batch, a_dtype=a, b_dtype=b,
-                            compute_dtype=comp, tile=t, names=names)
+                progress(i, len(tiles), f"tile {t.bm}x{t.bn}x{t.bk}")
+            ks = _core.lower_gemm(cur_gpu_config, "k", M, N, K, batch=batch, a_dtype=a, b_dtype=b,
+                                  compute_dtype=comp, tile=t, a_name=names[0], b_name=names[1], c_name=names[2])
             if not ks:
                 continue
-            out.append(_cand(ks, cur_gpu_config, ks[0].meta.get("tile", t.short()), flops, bytes_min, comp))
+            out.append(_cand(ks, cur_gpu_config, ks[0].meta.get("tile", "-"), flops, bytes_min, comp))
 
     elif kind in ("attn_decode", "attn_prefill"):
         B, H, kvh = gi("B", 1), gi("H", 1), gi("kv_heads", 1)
         S, dq, dv = gi("S", 1), gi("d_qk", 128), gi("d_v", 128)
         kw = dict(B=B, H=H, kv_heads=max(1, kvh), S=S, d_qk=dq, d_v=dv,
                   kv_dtype=k.get("kv_dtype", "bf16"), compute_dtype=k.get("compute_dtype", "bf16"))
-        tiles = [AttnTileConfig(**json.loads(fixed))] if fixed != "auto" else attn_search_space()
+        tiles = [_core.AttnTile(**json.loads(fixed))] if fixed != "auto" else _core.attn_search_space()
         kvb = DTYPE_BYTES[kw["kv_dtype"]]
         for i, t in enumerate(tiles):
             if progress:
-                progress(i, len(tiles), f"tile {t.short()}")
+                progress(i, len(tiles), f"tile {t.block_m}x{t.block_n}")
             if kind == "attn_decode":
-                ks = lower_attention_decode(cur_gpu_config, "k", v_in_k=bool(k.get("v_in_k", True)), tile=t, **kw)
+                ks = _core.lower_attention_decode(cur_gpu_config, "k", v_in_k=bool(k.get("v_in_k", True)), tile=t, **kw)
                 flops = 2.0 * B * H * S * (dq + dv)
                 bytes_min = B * max(1, kvh) * S * (dq + (0 if k.get("v_in_k", True) else dv)) * kvb
             else:
-                ks = lower_attention_prefill(cur_gpu_config, "k", causal=bool(k.get("causal", True)), tile=t, **kw)
+                ks = _core.lower_attention_prefill(cur_gpu_config, "k", causal=bool(k.get("causal", True)), tile=t, **kw)
                 frac = 0.5 if k.get("causal", True) else 1.0
                 flops = 2.0 * B * H * S * S * frac * (dq + dv)
                 bytes_min = B * max(1, kvh) * S * (dq + dv) * kvb
             if not ks:
                 continue
-            out.append(_cand(ks, cur_gpu_config, ks[0].meta.get("tile", t.short()), flops, bytes_min,
+            out.append(_cand(ks, cur_gpu_config, ks[0].meta.get("tile", "-"), flops, bytes_min,
                              kw["compute_dtype"]))
 
     elif kind == "elementwise":
         bi, bo = float(k.get("bytes_in", 0)), float(k.get("bytes_out", 0))
-        ks = lower_elementwise(cur_gpu_config, "k", bytes_in=bi, bytes_out=bo,
-                               flops=float(k.get("flops", 0)), sfu_ops=float(k.get("sfu_ops", 0)))
+        ks = _core.lower_elementwise(cur_gpu_config, "k", bytes_in=bi, bytes_out=bo,
+                                     flops=float(k.get("flops", 0)), sfu_ops=float(k.get("sfu_ops", 0)))
         out.append(_cand(ks, cur_gpu_config, "-", float(k.get("flops", 0)), bi + bo, "bf16"))
     else:
         raise ValueError(f"unknown kernel {kind}")
@@ -260,7 +254,7 @@ def _kernel_candidates(cur_gpu_config: HardwareSpec, k: dict, progress=None):
 
 
 def _cand(ks, cur_gpu_config, tile, flops, bytes_min, comp="bf16"):
-    res = [backend.evaluate(x, cur_gpu_config) for x in ks]
+    res = [_core.evaluate(cur_gpu_config, x) for x in ks]
     t = sum(r.time_s for r in res)
     m = ks[0].meta
     det: dict[str, float] = {}
@@ -363,7 +357,7 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
                                {"time_us": f"{cands[0]['time_us']:.3f}", "tflops": f"{cands[0]['tflops']:.0f}",
                                 "bound": cands[0]["bound"], "occupancy": cands[0]["occupancy"]})
             cands = [{k2: v for k2, v in c.items() if k2 != "_ks"} for c in cands]
-            out = {"gpu_name": cur_gpu_config.name, "sms": cur_gpu_config.sms, "backend": backend.BACKEND, "timeline": tl,
+            out = {"gpu_name": cur_gpu_config.name, "sms": cur_gpu_config.sms, "backend": "cpp", "timeline": tl,
                    "machine": machine_timeline(tl), "trace_text": trace,
                    "best": cands[0], "candidates": cands[:25], "tried": len(cands)}
         elif mode == "sweep":
@@ -580,7 +574,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
-    from tilesight.gpuTilingPerfHWModel.model.engine.backend import BACKEND
+    BACKEND = "cpp"
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"tilesight web UI on http://{host}:{port}  (engine backend: {BACKEND})")
     print("computation runs here; clients only need a browser")
