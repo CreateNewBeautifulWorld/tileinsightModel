@@ -2,10 +2,10 @@
 import pytest
 
 from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.gpuTilingPerfHWModel.spec import DTYPE_BYTES
-from tilesight.kernels.gemm import lower_gemm
-from tilesight.kernels.tiles import TileConfig
-from tilesight.server import _kernel_candidates
+from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.spec import DTYPE_BYTES
+from tilesight.model.kernels.gemm import lower_gemm
+from tilesight.model.kernels.tiles import TileConfig
+from tilesight.interfaceAndModelRun.server import _kernel_candidates
 
 NV = ["b300", "b200", "h200"]
 AMD = ["mi300x", "mi325x", "mi355x", "mi450"]

@@ -16,10 +16,10 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..gpuTilingPerfHWModel.spec import DTYPE_BYTES, WEIGHT_ONLY
-from .attention_blocks import lower_mha_gqa, lower_mla
-from .run_config import RunConfig
-from .spec import ModelSpec
+from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.spec import DTYPE_BYTES, WEIGHT_ONLY
+from tilesight.model.attention_blocks import lower_mha_gqa, lower_mla
+from tilesight.interfaceAndModelRun.run_config import RunConfig
+from tilesight.interfaceAndModelRun.spec import ModelSpec
 
 
 @dataclass

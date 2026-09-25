@@ -7,7 +7,7 @@
 Run:  PYTHONPATH=python python examples/sweep_ddr_bw_b300.py
 """
 from tilesight import HardwareSpec, ModelSpec, RunConfig
-from tilesight.dse.sweep import required_value, rows_to_csv, sweep
+from tilesight.model.dse.sweep import required_value, rows_to_csv, sweep
 
 cur_gpu_config = HardwareSpec.load("b300")
 model = ModelSpec.load("kimi_k2.hf")

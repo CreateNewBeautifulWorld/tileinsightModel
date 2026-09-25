@@ -4,10 +4,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from ..gpuTilingPerfHWModel.spec import DTYPE_BYTES, HardwareSpec
-from .attention_blocks import kv_bytes_per_seq
-from .run_config import RunConfig
-from .spec import ModelSpec
+from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.spec import DTYPE_BYTES, HardwareSpec
+from tilesight.model.attention_blocks import kv_bytes_per_seq
+from tilesight.interfaceAndModelRun.run_config import RunConfig
+from tilesight.interfaceAndModelRun.spec import ModelSpec
 
 GB = 1e9
 RUNTIME_RESERVE_GB = 4.0     # CUDA context, NCCL/NVSHMEM buffers, allocator slack  [calib]

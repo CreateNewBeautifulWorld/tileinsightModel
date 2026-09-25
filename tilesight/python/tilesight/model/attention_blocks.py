@@ -31,8 +31,8 @@ Core implementations (one GPU, tokens T = RunConfig.attn_tokens):
 """
 from __future__ import annotations
 
-from ..gpuTilingPerfHWModel.spec import DTYPE_BYTES
-from .run_config import RunConfig
+from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.spec import DTYPE_BYTES
+from tilesight.interfaceAndModelRun.run_config import RunConfig
 
 
 def _impl(blk, rc: RunConfig) -> str:
@@ -49,7 +49,7 @@ def _kv_len(blk, rc: RunConfig) -> int:
 
 def attn_core(prefix, *, B, H, KVH, Sq, Skv, d_qk, d_v, v_in_k, causal, impl, rc: RunConfig, window=0):
     """Emit the attention core (flash kernel op, or the 3 naive ops)."""
-    from .lower import Op, _act_gemm
+    from tilesight.model.lower import Op, _act_gemm
     if impl == "flash":
         kind = "attn_decode" if rc.phase == "decode" else "attn_prefill"
         return [Op(f"{prefix}.attn", kind, dict(B=B, H=H, kv_heads=KVH, S=Skv, d_qk=d_qk, d_v=d_v,
@@ -75,7 +75,7 @@ def _sq(rc: RunConfig) -> int:
 
 
 def lower_mha_gqa(blk, prefix, m, rc: RunConfig):
-    from .lower import Op, _ew, _gemm
+    from tilesight.model.lower import Op, _ew, _gemm
     t = blk["type"]
     tp, T, D = rc.tp, rc.attn_tokens, m.hidden
     H = blk["heads"]
@@ -109,7 +109,7 @@ def lower_mha_gqa(blk, prefix, m, rc: RunConfig):
 
 
 def lower_mla(blk, prefix, m, rc: RunConfig):
-    from .lower import Op, _ew, _gemm
+    from tilesight.model.lower import Op, _ew, _gemm
     tp, T, D = rc.tp, rc.attn_tokens, m.hidden
     Hl = max(1, blk["heads"] // tp)
     qr, kvr, nope, rope, vh = (blk.get("q_lora_rank", 0), blk["kv_lora_rank"], blk["qk_nope"],

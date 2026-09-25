@@ -1,6 +1,6 @@
 """Kimi-K2 on 8x B300: decode + prefill reports, memory, bottlenecks, tile comparison."""
 from tilesight import CurModelConfig, HardwareSpec, ModelSpec, RunConfig, run
-from tilesight.report.table import model_summary
+from tilesight.generateResult.report.table import model_summary
 
 # The model's only two inputs: cur_gpu_config (what the part is, incl. how it tiles) and
 # cur_model_config (what runs on it: architecture + run settings).

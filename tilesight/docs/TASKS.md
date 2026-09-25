@@ -51,7 +51,7 @@ Always: tests first, both backends green, update DESIGN.md if a formula changes.
 ⬜ C4 TC peak per dtype via CUTLASS/DeepGEMM microkernels (incl. 2-CTA) ⬜ C5 SFU exp rate
 ⬜ C6 TMA vs LSU per-SM issue rates ⬜ C7 launch overhead with/without CUDA graphs
 ⬜ C8 NCCL/NVSHMEM alpha-beta per message size (allreduce, all-to-all)
-Accept: `python -m tilesight.calibrate --gpu 0 --out gpuTilingPerfHWModel/db/<gpu>.calib.yaml`; loader
+Accept: `python -m tilesight.calibrate --gpu 0 --out interfaceAndModelRun/gpuTilingPerfHWModel/db/<gpu>.calib.yaml`; loader
 merges `*.calib.yaml` over the base file; every `[calib]` field covered.
 
 ## Phase D — validation harness
@@ -132,7 +132,7 @@ Targets (paper): GEMM MAPE ≈12%, distributed ≈16% wMAPE, serving ≈14% wMAP
 ⬜ G6 Power/energy lane (pJ/byte, pJ/flop) → tokens/J in reports and DSE.
 
 ## Phase W (updated)
-✅ slice-based GPU config (`gpuTilingPerfHWModel/slice_config.py`) with derived TFLOPS/PFLOPS/bandwidths and a
+✅ slice-based GPU config (`interfaceAndModelRun/gpuTilingPerfHWModel/slice_config.py`) with derived TFLOPS/PFLOPS/bandwidths and a
    translation into the flat config; Kimi-K3 10-layer workload preset; INTERFACE.md
 ✅ model organised in three blocks (shader slice / gmem / memory), L1 as a per-slice resource,
    `by_domain()` roll-up everywhere; flash-vs-naive comparison
@@ -166,7 +166,7 @@ Targets (paper): GEMM MAPE ≈12%, distributed ≈16% wMAPE, serving ≈14% wMAP
 ⬜ W5 Auth/limits if exposed beyond the LAN (token header, per-IP job cap, max sweep points)
 
 ## Phase H — from research report 02 (docs/research/02_accuracy_tuning_presets_kimi_k3.md)
-⬜ **H1 GB300 preset** `gpuTilingPerfHWModel/db/gb300.yaml` (NVL72 domain 72, NVLink5 1.8 TB/s bidir); resolve the
+⬜ **H1 GB300 preset** `interfaceAndModelRun/gpuTilingPerfHWModel/db/gb300.yaml` (NVL72 domain 72, NVLink5 1.8 TB/s bidir); resolve the
   BF16/FP8 peak conflict (2250/4500 vs 2500/5000) with a probe; keep `[calib]` tags.
 🟡 **H2 AMD presets added** (mi300x/mi325x/mi355x/mi450: LDS as on-chip, MALL modeled as `l2`,
   no TMA/TMEM/clusters, buffer_lds/tdm load paths, MFMA `tc_min_m` 16). **Still to do:**

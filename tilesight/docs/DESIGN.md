@@ -24,7 +24,7 @@ ModelSpec (blocks: mla/gqa/mlp/moe/norm/raw)      model/spec.py      <- user giv
    │  RunConfig (phase, batch, seq, tp/dp/ep, dtypes)
    ▼
 Ops for one GPU (gemm, attn_decode, attn_prefill, elementwise, allreduce, a2a)   model/lower.py
-   │  tile policy (GPU config, gpuTilingPerfHWModel/schema.py's compute.tile_policy.*):
+   │  tile policy (GPU config, interfaceAndModelRun/gpuTilingPerfHWModel/schema.py's compute.tile_policy.*):
    │  fixed | per-op override (fnmatch) | auto search (kernels/tiles.py)
    ▼
 Kernels = tile execution plans lowered to numbers (ir/kernel.py)   kernels/*.py
@@ -256,7 +256,7 @@ weights (per-op resident bytes × repeat, with sharding) + KV cache (per family,
 sliding-window layers store only `min(seq, window)` tokens) × seqs/rank + 2× peak live
 activation + runtime reserve (4 GB, calib). Reports fit/overflow and max seqs per rank.
 
-## 7b. Request-level runs (`model/request.py`)
+## 7b. Request-level runs (`interfaceAndModelRun/request.py`)
 Config: `prompt_len` (P), `output_len` (O), `page_size`, `kv_reserve: peak|current`,
 `decode_samples`, `prefill_batch`.
 - TTFT = prefill step over P tokens (`prefill_batch` sequences).

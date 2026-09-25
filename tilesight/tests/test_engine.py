@@ -2,11 +2,11 @@
 import math
 
 from tilesight import HardwareSpec
-from tilesight.engine import reference
-from tilesight.engine.cache import hit_prob, expected_misses
-from tilesight.ir.kernel import Action, Kernel
-from tilesight.kernels.gemm import lower_gemm
-from tilesight.kernels.tiles import TileConfig
+from tilesight.model.engine import reference
+from tilesight.model.engine.cache import hit_prob, expected_misses
+from tilesight.model.ir.kernel import Action, Kernel
+from tilesight.model.kernels.gemm import lower_gemm
+from tilesight.model.kernels.tiles import TileConfig
 
 HW = HardwareSpec.load("b300")
 

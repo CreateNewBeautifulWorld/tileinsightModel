@@ -2,12 +2,12 @@
 from dataclasses import replace
 
 from tilesight import HardwareSpec, ModelSpec, RunConfig, run_model
-from tilesight.kernels.gemm import lower_gemm, occupancy
-from tilesight.kernels.tiles import TileConfig
-from tilesight.engine import reference
+from tilesight.model.kernels.gemm import lower_gemm, occupancy
+from tilesight.model.kernels.tiles import TileConfig
+from tilesight.model.engine import reference
 from tilesight.model.memory import kv_bytes_per_seq_all
-from tilesight.model.request import run_request
-from tilesight.report.table import resource_class
+from tilesight.interfaceAndModelRun.request import run_request
+from tilesight.generateResult.report.table import resource_class
 
 B300, H200 = HardwareSpec.load("b300"), HardwareSpec.load("h200")
 KIMI = ModelSpec.load("kimi_k2.hf")
@@ -75,9 +75,9 @@ def test_resource_class_parsing():
 
 
 def test_timeline_matches_engine_round_and_lanes():
-    from tilesight.kernels.gemm import lower_gemm as lg
-    from tilesight.report.timeline import steady_timeline, timeline_text
-    from tilesight.engine import backend
+    from tilesight.model.kernels.gemm import lower_gemm as lg
+    from tilesight.generateResult.report.timeline import steady_timeline, timeline_text
+    from tilesight.model.engine import backend
     cur_gpu_config = B300
     k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
@@ -97,8 +97,8 @@ def test_timeline_matches_engine_round_and_lanes():
 
 
 def test_timeline_reflects_the_bottleneck():
-    from tilesight.kernels.attention import lower_attention_decode
-    from tilesight.report.timeline import steady_timeline
+    from tilesight.model.kernels.attention import lower_attention_decode
+    from tilesight.generateResult.report.timeline import steady_timeline
     k = lower_attention_decode(B300, "a", B=32, H=64, kv_heads=1, S=8192,
                                d_qk=576, d_v=512, v_in_k=True)[0]
     tl = steady_timeline(k, B300)
@@ -109,8 +109,8 @@ def test_timeline_reflects_the_bottleneck():
 
 
 def test_timeline_cycles_and_trace_text():
-    from tilesight.kernels.gemm import lower_gemm as lg
-    from tilesight.report.timeline import steady_timeline, timeline_text, trace_text
+    from tilesight.model.kernels.gemm import lower_gemm as lg
+    from tilesight.generateResult.report.timeline import steady_timeline, timeline_text, trace_text
     cur_gpu_config = B300
     k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
@@ -135,8 +135,8 @@ def test_timeline_cycles_and_trace_text():
 def test_cycle_csv_one_row_per_cycle_one_column_per_unit():
     import csv as _csv
     import io
-    from tilesight.kernels.gemm import lower_gemm as lg
-    from tilesight.report.timeline import cycle_csv, machine_timeline, steady_timeline
+    from tilesight.model.kernels.gemm import lower_gemm as lg
+    from tilesight.generateResult.report.timeline import cycle_csv, machine_timeline, steady_timeline
     cur_gpu_config = B300
     k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, cluster_m=2))[0]
@@ -164,9 +164,9 @@ def test_cycle_csv_one_row_per_cycle_one_column_per_unit():
 
 def test_excel_grid_colours_tiles_by_iteration(tmp_path):
     from openpyxl import load_workbook
-    from tilesight.kernels.gemm import lower_gemm as lg
-    from tilesight.report.excel import write_excel
-    from tilesight.report.timeline import steady_timeline
+    from tilesight.model.kernels.gemm import lower_gemm as lg
+    from tilesight.generateResult.report.excel import write_excel
+    from tilesight.generateResult.report.timeline import steady_timeline
     cur_gpu_config = B300
     k = lg(cur_gpu_config, "g", 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
            tile=TileConfig(bm=128, bn=256, bk=64, stages=4, cluster_m=2))[0]
@@ -196,7 +196,7 @@ def test_excel_grid_colours_tiles_by_iteration(tmp_path):
 
 
 def test_extra_onchip_buffer_cuts_hbm_traffic():
-    from tilesight.kernels.gemm import lower_gemm as lg
+    from tilesight.model.kernels.gemm import lower_gemm as lg
     sram = {"memory.sram": {"capacity_MB": 2048, "effective_capacity_MB": 2048,
                             "bandwidth_TBps": 15.0, "latency_ns": 400, "assoc": 16,
                             "per_sm_max_GBps": 180}}
@@ -208,14 +208,14 @@ def test_extra_onchip_buffer_cuts_hbm_traffic():
     ddr_before = sum(a.work.get("ddr", 0) for a in with_buf.body)
     assert ddr_before < sum(a.work.get("ddr", 0) for a in base.body)
     assert any(a.work.get("sram", 0) > 0 for a in with_buf.body)
-    from tilesight.engine import backend
+    from tilesight.model.engine import backend
     assert backend.evaluate(with_buf, B300.override(sram)).time_s < backend.evaluate(base, B300).time_s
 
 
 def test_buffer_closed_form_and_search_agree_on_direction():
     from tilesight import ModelSpec, RunConfig
-    from tilesight.dse.buffer import best_alloc, profile_classes, with_buffer
-    from tilesight.model.runner import run_model
+    from tilesight.model.dse.buffer import best_alloc, profile_classes, with_buffer
+    from tilesight.interfaceAndModelRun.runner import run_model
     m = ModelSpec.load("kimi_k2.hf")
     rc = RunConfig(phase="decode", batch=64, seq_len=4096, dp=8)
     prof = profile_classes(m, B300, rc)
@@ -235,8 +235,8 @@ def test_buffer_closed_form_and_search_agree_on_direction():
 
 def test_buffer_policies_are_wired():
     from tilesight import ModelSpec, RunConfig
-    from tilesight.dse.buffer import with_buffer
-    from tilesight.model.runner import run_model
+    from tilesight.model.dse.buffer import with_buffer
+    from tilesight.interfaceAndModelRun.runner import run_model
     m, rc = ModelSpec.load("kimi_k2.hf"), RunConfig(phase="decode", batch=64, seq_len=4096, dp=8)
     plain = run_model(m, with_buffer(B300, 32768, policy="pin", pin={"weight": 1.0}), rc).step_time_s
     tuned = run_model(m, with_buffer(B300, 32768, policy="pin", pin={"weight": 1.0},

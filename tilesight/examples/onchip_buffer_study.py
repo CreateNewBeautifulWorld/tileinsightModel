@@ -3,8 +3,8 @@
 Run: PYTHONPATH=python python examples/onchip_buffer_study.py
 """
 from tilesight import HardwareSpec, ModelSpec, RunConfig
-from tilesight.dse.buffer import capacity_curve, optimize_buffer, with_buffer
-from tilesight.model.runner import run_model
+from tilesight.model.dse.buffer import capacity_curve, optimize_buffer, with_buffer
+from tilesight.interfaceAndModelRun.runner import run_model
 
 cur_gpu_config, model = HardwareSpec.load("b300"), ModelSpec.load("kimi_k2.hf")
 rc = RunConfig(phase="decode", batch=256, seq_len=8192, dp=8)

@@ -19,11 +19,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..gpuTilingPerfHWModel.spec import DTYPE_BYTES
-from .lower import lower_model
-from .memory import kv_bytes_per_seq_all
-from .run_config import RunConfig
-from .spec import ModelSpec
+from tilesight.interfaceAndModelRun.gpuTilingPerfHWModel.spec import DTYPE_BYTES
+from tilesight.model.lower import lower_model
+from tilesight.model.memory import kv_bytes_per_seq_all
+from tilesight.interfaceAndModelRun.run_config import RunConfig
+from tilesight.interfaceAndModelRun.spec import ModelSpec
 
 ALIGN = 2 * 1024 * 1024          # 2 MB, a large-page boundary
 
@@ -49,7 +49,7 @@ class Region:
 
     def tile_addr(self, i: int, j: int, bm: int, bn: int, layout: str = "row") -> int:
         """Byte address of tile (i, j) of this matrix under `layout`."""
-        from ..report.addressing import tile_index
+        from tilesight.generateResult.report.addressing import tile_index
         ni, nj = self.tile_grid(bm, bn)
         tile_bytes = int(bm * bn * self.elem_bytes)
         return self.base + tile_index(layout, i, j, ni, nj) * tile_bytes
