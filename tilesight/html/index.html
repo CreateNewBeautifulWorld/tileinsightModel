@@ -64,6 +64,38 @@
 </style>
 </head>
 <body>
+<div id="buildOverlay" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;
+  align-items:center;justify-content:center;text-align:center;padding:20px">
+  <div style="max-width:420px">
+    <div id="buildSpin" class="spin" style="width:22px;height:22px;border-width:3px;margin:0 auto 14px"></div>
+    <div id="buildMsg" style="font-size:14px">Checking tilesight core…</div>
+    <div id="buildDetail" class="hint" style="margin-top:8px;white-space:pre-wrap"></div>
+  </div>
+</div>
+<script>
+(function(){
+  var overlay=document.getElementById('buildOverlay'),
+      spin=document.getElementById('buildSpin'),
+      msg=document.getElementById('buildMsg'),
+      detail=document.getElementById('buildDetail');
+  function poll(){
+    fetch('/api/build_status').then(function(r){return r.json()}).then(function(st){
+      if(st.stage==='ready'){ overlay.style.display='none'; return; }
+      if(st.stage==='error'){
+        spin.style.display='none';
+        msg.textContent='C++ core failed to build.';
+        msg.className='err';
+        detail.textContent=st.message||'';
+        return;
+      }
+      msg.textContent='Building the C++ core (first run only, ~1–2 min)…';
+      detail.textContent=st.message||'';
+      setTimeout(poll, 1200);
+    }).catch(function(){ setTimeout(poll, 800); });
+  }
+  poll();
+})();
+</script>
 <header>
   <h1>TileSight · analytical GPU &amp; LLM performance model</h1>
   <div class="sub">Static model — no GPU and no model execution. Computation runs on this server

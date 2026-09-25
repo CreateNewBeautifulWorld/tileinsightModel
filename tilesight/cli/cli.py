@@ -16,12 +16,14 @@ import json
 
 import yaml
 
-from tilesight import CurModelConfig, HardwareSpec, ModelSpec, RunConfig, run, run_model
-from tilesight.gpuTilingPerfHWModel.model.dse.sweep import required_value, rows_to_csv, sweep
-from tilesight.gpuTilingPerfHWModel.genResult.table import model_summary, ops_csv
+# Deliberately NOT imported at module top: `serve` must be able to bind its socket (and start
+# showing build status in the browser) before tilesight._core exists at all, so nothing here can
+# force-trigger the auto-build ahead of that. Every other subcommand imports what it needs lazily
+# inside main(), right after the `serve` branch, same net effect as a plain top-level import.
 
 
-def _rc(a) -> RunConfig:
+def _rc(a):
+    from tilesight import RunConfig
     kw = {}
     if a.run_config:
         with open(a.run_config) as f:
@@ -40,7 +42,8 @@ def _rc(a) -> RunConfig:
     return RunConfig(**kw)
 
 
-def _cur_gpu_config(a) -> HardwareSpec:
+def _cur_gpu_config(a):
+    from tilesight import HardwareSpec
     cur_gpu_config = HardwareSpec.load(a.cur_gpu_config)
     if getattr(a, "ideal", False):
         cur_gpu_config = cur_gpu_config.lossless()
@@ -174,8 +177,12 @@ def main(argv=None):
             p.add_argument("--hi", type=float, default=64.0)
     a = ap.parse_args(argv)
     if a.cmd == "serve":
-        from tilesight.cli.server import serve
-        return serve(a.host, a.port)
+        from tilesight.cli.server_boot import serve_with_autobuild
+        return serve_with_autobuild(a.host, a.port)
+
+    from tilesight import CurModelConfig, HardwareSpec, ModelSpec, RunConfig, run, run_model
+    from tilesight.gpuTilingPerfHWModel.model.dse.sweep import required_value, rows_to_csv, sweep
+    from tilesight.gpuTilingPerfHWModel.genResult.table import model_summary, ops_csv
     if a.cmd == "gpu":
         from tilesight.gpuTilingPerfHWModel.interfaceAndRun.slice_config import (SLICE_FIELDS, as_markdown as s_md, derive,
                                       to_hardware_spec, validate_slice_config)

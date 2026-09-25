@@ -15,50 +15,31 @@ Quick start:
 `run_model(model, cur_gpu_config, rc)` is the lower-level, three-argument engine entry point
 that `run()` wraps; existing code and internal callers keep using it directly.
 """
-def _ensure_core_built() -> None:
-    """Build tilesight._core on first use if it isn't there yet, instead of failing on import.
+import sys
 
-    Only ever runs once per checkout: once build/_core*.so exists next to this file, the
-    plain `import tilesight._core` below succeeds immediately and this function is a no-op.
-    """
-    try:
-        import tilesight._core  # noqa: F401
-        return
-    except ImportError:
-        pass
+# `python -m tilesight.cli.cli serve` (and the `tilesight` console script) import this package
+# BEFORE any code in cli.py runs — that's how Python resolves a dotted module path, there is no
+# way for cli.py to "get in first". So `serve`'s whole point (bind the socket, show build
+# progress in the browser, build in the background) has to be decided right here, from the raw
+# process argv, not from inside cli.py. `argv[1]` is always this CLI's subcommand name, and
+# "serve" isn't a value any other subcommand takes there, so this is unambiguous in practice.
+_DEFERRED_BUILD = len(sys.argv) > 1 and sys.argv[1] == "serve"
 
-    import subprocess
-    import sys
-    from pathlib import Path
+from tilesight import _core_builder  # noqa: E402
 
-    root = Path(__file__).resolve().parent
-    build_dir = root / "build"
-    print("tilesight: C++ core not built yet, building it now (one-time, ~1-2 min)...",
-          file=sys.stderr)
-    try:
-        subprocess.run(
-            ["cmake", "-S", str(root), "-B", str(build_dir),
-             f"-DPython_EXECUTABLE={sys.executable}"],
-            check=True,
-        )
-        subprocess.run(["cmake", "--build", str(build_dir), "-j"], check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        raise ImportError(
-            "tilesight: auto-build of the C++ core failed. Install a C++17 compiler and cmake, "
-            "or build it yourself with `cmake -S . -B build && cmake --build build -j` from the "
-            f"project root ({root}). Underlying error: {e}"
-        ) from e
+if not _DEFERRED_BUILD:
+    _core_builder.ensure_core_built()
 
-    import importlib
-    importlib.invalidate_caches()
-    import tilesight._core  # noqa: F401
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import HardwareSpec  # noqa: E402
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig  # noqa: E402
+from tilesight.gpuTilingPerfHWModel.interfaceAndRun.model_spec import ModelSpec  # noqa: E402
 
-
-_ensure_core_built()
-
-from tilesight.gpuTilingPerfHWModel.interfaceAndRun.hardware_spec import HardwareSpec
-from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
-from tilesight.gpuTilingPerfHWModel.interfaceAndRun.runner import CurModelConfig, run, run_model
-from tilesight.gpuTilingPerfHWModel.interfaceAndRun.model_spec import ModelSpec
+if _DEFERRED_BUILD:
+    # cli/server_boot.py builds tilesight._core itself, in a background thread, once the socket
+    # is already bound; only after that does anything actually need CurModelConfig/run, at which
+    # point cli/server.py imports them straight from runner.py (not from here) and they work.
+    CurModelConfig = run = run_model = None
+else:
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.runner import CurModelConfig, run, run_model  # noqa: E402
 
 __all__ = ["CurModelConfig", "HardwareSpec", "ModelSpec", "RunConfig", "run", "run_model"]

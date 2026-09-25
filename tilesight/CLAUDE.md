@@ -91,7 +91,21 @@ tilesight/                   (this directory - both the project root and the pac
                               gpuTilingPerfHWModel/interfaceAndRun and call run() — neither
                               reaches into model/ directly.
   html/index.html, html/app.html   self-contained UI (no CDN/fonts/external requests) served by
-                              cli/server.py — keep it that way
+                              cli/server.py — keep it that way. Each has a #buildOverlay banner
+                              that polls /api/build_status on load and hides once the C++ core
+                              is ready (or shows the build error) — see cli/server_boot.py.
+  cli/server_boot.py         `serve`'s real entry point (cli.py delegates to it): binds the
+                              socket and serves html/ + /api/build_status immediately, builds
+                              tilesight._core in a background thread, then swaps in
+                              cli/server.py's Handler once it's ready. Stdlib-only at module
+                              scope on purpose — see _core_builder.py below for why.
+  _core_builder.py (project root)   builds tilesight._core (cmake configure+build) if it isn't
+                              there yet. tilesight/__init__.py calls it synchronously on import
+                              for every command except `serve` (checked via sys.argv, since
+                              __init__.py runs before any of cli.py's own code can) — `serve`
+                              defers it to cli/server_boot.py's background thread instead, so the
+                              page can show build progress rather than the terminal hanging with
+                              nothing listening yet.
 The compiled extension (CMakeLists.txt builds every gpuTilingPerfHWModel/model/**/*.cpp into it)
 lands right at this directory's root as _core*.so, since `from tilesight import _core` expects
 it right next to gpuTilingPerfHWModel/.

@@ -410,6 +410,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):                                       # noqa: N802
         path = self.path.split("?")[0]
+        if path == "/api/build_status":          # cli/server_boot.py swaps this handler in once
+            return self._json(200, {"stage": "ready", "message": ""})   # ready by construction
         if path in ("/", "/app", "/app.html"):
             return self._send(200, (WEB_DIR / "app.html").read_bytes(), "text/html; charset=utf-8")
         if path in ("/expert", "/index.html"):
