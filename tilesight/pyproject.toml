@@ -24,9 +24,12 @@ tilesight = "tilesight.cli.cli:main"
 # going up to this directory's parent and back down into itself - self-referential, but it's
 # the documented way to express this layout. Tested with `pip install -e . --no-build-isolation`.
 wheel.packages = ["../tilesight"]
-# Project-level files that live alongside the package but aren't part of it.
-wheel.exclude = ["docs/**", "tests/**", "examples/**", "*.md", "*.pdf", "*.toml", "CMakeLists.txt",
-                 ".gitignore"]
+# Project-level files that live alongside the package but aren't part of it. CMakeLists.txt is
+# deliberately NOT excluded: _core_builder.py auto-builds tilesight._core on first import if it
+# isn't already there (e.g. a wheel installed on a platform with no matching prebuilt binary), and
+# that only works if CMakeLists.txt actually ships with the installed package, not just in a git
+# checkout.
+wheel.exclude = ["docs/**", "tests/**", "examples/**", "*.md", "*.pdf", "*.toml", ".gitignore"]
 sdist.include = ["html/*.html", "gpuPresets/*.yaml", "modelPresets/*"]
 cmake.build-type = "Release"
 
