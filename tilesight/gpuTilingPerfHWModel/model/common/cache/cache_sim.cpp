@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <list>
 #include <unordered_map>
+#include <utility>
 
 namespace tilesight::cache {
 namespace {

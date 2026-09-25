@@ -1,5 +1,7 @@
 #include "address_map.hpp"
 
+#include <algorithm>
+
 namespace tilesight::cache {
 
 int64_t port_of(const AddrCfg& cfg, int64_t addr) {
