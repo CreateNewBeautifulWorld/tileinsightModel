@@ -6,3 +6,6 @@ __pycache__/
 # generated outputs (reports, traces, memory maps); keep the folders
 gpuTilingPerfHWModel/out/*/*
 !gpuTilingPerfHWModel/out/*/.gitkeep
+gpuTilingPerfHWModel/regr/jobs/*
+!gpuTilingPerfHWModel/regr/jobs/.gitkeep
+gpuTilingPerfHWModel/regr/registry.json

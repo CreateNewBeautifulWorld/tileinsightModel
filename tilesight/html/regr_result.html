@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TileSight — regression job</title>
+<style>
+  :root{--bg:#fbfbfa;--panel:#fff;--ink:#1d1c1a;--muted:#6b6a67;--line:#e3e1dd;--accent:#b4552d;
+    --soft:#f4ece7;--ok:#2f7d54;--warn:#b3261e;--mono:ui-monospace,Menlo,Consolas,monospace;
+    box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161514;--panel:#1f1e1c;
+    --ink:#ece9e4;--muted:#a09d97;--line:#33312e;--accent:#e0794c;--soft:#2a221d;--ok:#6cc08b;--warn:#f0857d}}
+  *,*::before,*::after{box-sizing:inherit}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{max-width:1120px;margin:0 auto;padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  h1{font-size:19px;margin:0 0 4px}
+  main{max-width:1120px;margin:0 auto;padding:16px 20px 60px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 12px}
+  button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);
+    border-radius:7px;padding:7px 9px;cursor:pointer;width:auto}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{padding:9px 16px}
+  input{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px 9px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:5px 7px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .mono{font-family:var(--mono);font-size:11.5px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px}
+  .kpi{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .kpi b{display:block;font-size:19px} .kpi span{font-size:11px;color:var(--muted);text-transform:uppercase}
+  .hint{font-size:12px;color:var(--muted)} .err{color:var(--warn);font-family:var(--mono);font-size:12px;white-space:pre-wrap}
+  .scroll{overflow-x:auto} details summary{cursor:pointer;font-size:12px;color:var(--muted)}
+  .sec{margin-top:18px}
+  .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;text-transform:capitalize;margin-left:8px}
+  .badge.pending{background:var(--soft);color:var(--muted)} .badge.running{background:#fdf0d5;color:#95610f}
+  .badge.done{background:#e4f3ea;color:var(--ok)} .badge.error{background:#fbe4e2;color:var(--warn)}
+  .tagpill{display:inline-block;font-size:12px;background:var(--soft);color:var(--muted);border-radius:10px;padding:2px 9px}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="title">TileSight — regression job <span id="badge"></span></h1>
+    <div class="hint" id="meta"></div>
+  </div>
+  <div><a href="/regr" class="hint">← all regression jobs</a></div>
+</header>
+<main>
+  <div id="status" class="panel"></div>
+  <div id="results"></div>
+</main>
+<script src="results.js"></script>
+<script>
+const jobId=new URLSearchParams(location.search).get("job");
+JOB=jobId;
+DL={
+  xlsx:phase=>fileUrl(phase,"cycles.xlsx"),
+  csv:phase=>fileUrl(phase,"cycles.csv"),
+  pdf:()=>null,                       // not generated for a regression job (yet)
+  memmap:(phase,fmt)=>fileUrlByExt(phase,fmt),
+};
+RESULTS_FOOTER=()=>`<div class="row"><a href="/regr" class="hint" style="align-self:center">← back to all jobs</a></div>`;
+let FILES=null;
+function fileUrl(phase,name){ return API+"/api/regr/file?job="+JOB+"&phase="+phase+"&name="+encodeURIComponent(name); }
+function fileUrlByExt(phase,ext){
+  const names=(FILES&&FILES[phase])||[];
+  const n=names.find(x=>x.endsWith("."+ext) && x.startsWith("memmap"));
+  return n?fileUrl(phase,n):null;
+}
+async function load(){
+  const r=await fetch(API+"/api/regr/jobs/"+jobId);
+  if(!r.ok){ $("status").innerHTML=`<span class="err">job ${esc(jobId)} not found.</span>`; return; }
+  const j=await r.json();
+  document.title=`TileSight — ${j.name}`;
+  $("title").innerHTML=`TileSight — ${esc(j.name)} <span class="badge ${j.status}">${esc(j.status)}</span>`;
+  $("meta").innerHTML=`job #${j.id} · ${esc(j.gpu)} · ${esc(j.phase)} · by ${esc(j.submitted_by)}`+
+    (j.tag?` · <span class="tagpill">${esc(j.tag)}</span>`:"");
+  if(j.status==="pending" || j.status==="running"){
+    $("status").innerHTML=`<div class="hint">${j.status==="pending"?"queued, waiting for the worker…":
+      `running… ${j.done}/${j.total} · ${esc(j.label||"")}`}</div>`;
+    $("results").innerHTML="";
+    setTimeout(load, 1500);
+    return;
+  }
+  if(j.status==="error"){
+    $("status").innerHTML=`<span class="err">${esc(j.error||"failed")}</span>`;
+    return;
+  }
+  $("status").innerHTML="";
+  if(!j.result){ $("status").innerHTML=`<span class="err">no result was saved for this job.</span>`; return; }
+  // The worker always writes cycles.xlsx/csv + summary.txt + memmap_*.{xlsx,csv,txt} into this
+  // job's own out directory, per phase; the memmap stem varies (model/gpu/phase), so pick its
+  // name from the already-fetched result's memmap.files (the absolute source paths from before
+  // they were copied here) rather than guessing a fixed filename.
+  FILES={};
+  const phases = j.mode==="workload_both" ? Object.keys(j.result) : [j.phase];
+  for(const p of phases){
+    const res = j.mode==="workload_both" ? j.result[p] : j.result;
+    const mmFiles = (res && res.memmap && res.memmap.files) || {};
+    FILES[p]=Object.values(mmFiles).map(pth=>pth.split(/[\\/]/).pop());
+  }
+  const started=j.started_at?new Date(j.started_at):null, done=j.completed_at?new Date(j.completed_at):null;
+  const secs = started&&done ? (done-started)/1000 : 0;
+  showResults(j.result, secs);
+}
+load();
+</script>
+</body>
+</html>

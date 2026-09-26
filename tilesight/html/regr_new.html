@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>TileSight — single-GPU model</title>
+<title>TileSight — new regression job</title>
 <style>
   :root{--bg:#fbfbfa;--panel:#fff;--ink:#1d1c1a;--muted:#6b6a67;--line:#e3e1dd;--accent:#b4552d;
     --soft:#f4ece7;--ok:#2f7d54;--warn:#b3261e;--mono:ui-monospace,Menlo,Consolas,monospace;
@@ -12,7 +12,7 @@
     --ink:#ece9e4;--muted:#a09d97;--line:#33312e;--accent:#e0794c;--soft:#2a221d;--ok:#6cc08b;--warn:#f0857d}}
   *,*::before,*::after{box-sizing:inherit}
   body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  header{max-width:1120px;margin:0 auto;padding:20px 20px 0}
+  header{max-width:1120px;margin:0 auto;padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
   h1{font-size:19px;margin:0 0 10px}
   .steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
   .steps div{font-size:12px;padding:6px 12px;border-radius:20px;background:var(--panel);
@@ -37,14 +37,8 @@
   button.go{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;width:auto;padding:9px 20px;cursor:pointer}
   button.ghost{width:auto;padding:9px 16px;cursor:pointer}
   button:disabled{opacity:.5;cursor:not-allowed}
-  .bar{height:8px;background:var(--soft);border-radius:5px;overflow:hidden;margin:10px 0}
-  .bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .25s}
-  .log{font-family:var(--mono);font-size:11.5px;background:var(--bg);border:1px solid var(--line);
-    border-radius:8px;padding:10px;height:132px;overflow:auto;white-space:pre-wrap;color:var(--muted)}
   table{width:100%;border-collapse:collapse;font-size:12.5px}
   th,td{text-align:left;padding:5px 7px;border-bottom:1px solid var(--line);white-space:nowrap}
-  th{color:var(--muted);font-size:11px;text-transform:uppercase}
-  td.num{text-align:right;font-variant-numeric:tabular-nums}
   .mono{font-family:var(--mono);font-size:11.5px}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px}
   .kpi{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
@@ -91,14 +85,14 @@
 })();
 </script>
 <header>
-  <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap">
-    <h1>TileSight — single-GPU analytical model</h1>
-    <a href="/regr" class="hint">regression jobs →</a>
+  <div>
+    <h1>TileSight — new regression job</h1>
+    <div class="steps">
+      <div id="s1" class="on">1 · GPU</div><div id="s2">2 · config</div>
+      <div id="s3">3 · workload</div><div id="s4">4 · name &amp; submit</div>
+    </div>
   </div>
-  <div class="steps">
-    <div id="s1" class="on">1 · GPU</div><div id="s2">2 · config</div>
-    <div id="s3">3 · workload</div><div id="s4">4 · run</div><div id="s5">5 · results</div>
-  </div>
+  <div><a href="/regr" class="hint">← all regression jobs</a></div>
 </header>
 <main>
 
@@ -137,45 +131,40 @@
     <input type="checkbox" id="cmpattn" style="width:auto"> also run it without flash attention, for comparison</label>
   <div style="margin-top:14px">
     <label for="simwin"><b>Cache simulation window</b>: <span id="simwinv"></span></label>
-    <input type="range" id="simwin" min="0" max="7" step="1" value="3" oninput="simWinLabel()" style="width:100%">
+    <input type="range" id="simwin" min="0" max="7" step="1" value="7" oninput="simWinLabel()" style="width:100%">
     <div class="hint">How much of each kernel the L2 / on-chip-buffer / L1 simulation replays, tile access by
-      tile access. By default the <b>whole kernel</b> (every wave, every K step) up to this many accesses per
-      kernel; a kernel over it drops waves first and K steps last. A longer window is slower but more
-      accurate: capacity evictions (does the working set fit the L2, or the buffer every shader core shares)
-      and 2&nbsp;MB DMA-page reuse (the first K step into a page pays for all of it) only show up over a long
-      enough trace — a short one sees only the first, compulsory misses and extrapolates them.
-      The results show, per kernel, how much of it was actually replayed.</div>
+      tile access — capacity evictions and 2&nbsp;MB DMA-page reuse only show up over a long enough trace,
+      so a short window sees only the first, compulsory misses and extrapolates them. A regression job
+      defaults to the <b>widest</b> setting (the whole kernel — every wave, every K step, of every
+      attention/GEMM layer the workload lowers to) since it runs in the background anyway and accuracy
+      matters more here than turnaround; narrow it if this particular regression doesn't need that.</div>
   </div>
-  <div class="row"><button class="ghost" onclick="go(2)">Back</button><button class="go" onclick="run()">Run model</button></div>
+  <div class="row"><button class="ghost" onclick="go(2)">Back</button><button class="go" onclick="go(4)">Next</button></div>
 </section>
 
 <section id="p4" class="panel" style="display:none">
-  <h2>Step 4 — running</h2>
-  <div id="plabel" class="hint">starting…</div>
-  <div class="bar"><i id="fill"></i></div>
-  <div class="log" id="log"></div>
-  <div class="row"><button class="ghost" onclick="go(3)">Back</button></div>
+  <h2>Step 4 — name it &amp; submit</h2>
+  <div class="hint">This queues the run — it happens in the background, one regression job at a time, so it
+    never competes with anyone using the interactive wizard. Come back to
+    <a href="/regr">the dashboard</a> to watch it and see the results once it's done.</div>
+  <label>Name</label>
+  <input id="jobname" placeholder="e.g. kimi-k2 decode, b300, dma_smart">
+  <label>Tag <span class="hint" style="display:inline">(free text — shown on the dashboard; use it for whatever you're comparing, e.g. a commit, a config variant, a baseline)</span></label>
+  <input id="jobtag" placeholder="e.g. baseline-before-fetch-modes">
+  <div id="submitmsg" class="hint" style="margin-top:10px"></div>
+  <div class="row"><button class="ghost" onclick="go(3)">Back</button>
+    <button class="go" id="submitbtn" onclick="createJob()">Create job</button></div>
 </section>
 
-<section id="p5" class="panel" style="display:none">
-  <h2>Step 5 — results</h2>
-  <div id="results"></div>
-</section>
 </main>
-<script src="results.js"></script>
 <script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const API=location.origin.startsWith("http")?location.origin:"http://127.0.0.1:8000";
 let OPTS=null, SCHEMA=null, SLICE=null, GPU="b300", CUSTOM=false, GPU_CONFIG_MODE="flat";
-DL={
-  xlsx:(phase,full)=>API+'/api/xlsx?job='+JOB+'&phase='+phase+(full?'&full=1':''),
-  csv:(phase,full)=>API+'/api/csv?job='+JOB+'&phase='+phase+(full?'&full=1':''),
-  pdf:phase=>API+'/api/pdf?job='+JOB+'&phase='+phase,
-  memmap:(phase,fmt)=>API+'/api/memmap?job='+JOB+'&phase='+phase+(fmt==='csv'?'&fmt=csv':''),
-};
-RESULTS_FOOTER=()=>`<div class="row"><button class="ghost" onclick="go(3)">change workload</button>
-    <button class="ghost" onclick="go(1)">change GPU</button></div>`;
 
 function go(n){
-  for(let i=1;i<=5;i++){ $("p"+i).style.display = i===n?"block":"none";
+  for(let i=1;i<=4;i++){ $("p"+i).style.display = i===n?"block":"none";
     const s=$("s"+i); s.className = i===n?"on":(i<n?"done":""); }
   if(n===2){ if(!$("sliceform").innerHTML) buildSliceForm();
              if(GPU_CONFIG_MODE==="flat" && !$("gpuTilingPerfHWModelYaml").value.trim()) loadPreset(); }
@@ -282,11 +271,6 @@ async function validateHw(){
     ? `<span class="err">${j.problems.join("\n")}</span>` : `<span style="color:var(--ok)">config is valid (${j.fields} fields set)</span>`;
 }
 const WL_DEFAULTS={};
-// Shown directly: the most common attention shape (type/heads/Q·K·V dims), FFN shape (dim per
-// expert, expert count), and just the two dtypes that matter most (weights, KV cache).
-// Everything else (MLA-specific ranks, flash/causal/sliding-window details, topk/gating, the
-// other four per-tensor dtypes) still exists and still works, just tucked under "advanced" per
-// section so a first-time config isn't 30 fields deep.
 const WL_BASIC=new Set(["name","hidden","layers",
   "attention.type","attention.impl","attention.heads","attention.head_dim","attention.v_head_dim",
   "ffn.type","ffn.d_ff","ffn.experts",
@@ -306,8 +290,6 @@ function buildWorkloadForm(){
   function field(f){
     const id="w_"+f.path.replace(/\./g,"__");
     const o=opts[f.path];
-    // run.phase's model-layer default is "decode" (for the CLI's single-phase run_workload());
-    // the wizard's own default is "both", since that's what it actually runs unless you narrow it.
     const dflt=f.path==="run.phase"?"both":f.default;
     const ctl = o ? `<select id="${id}">${o.map(v=>`<option${String(dflt)===v?" selected":""}>${v}</option>`).join("")}</select>`
       : (f.kind==="bool" ? `<select id="${id}"><option${f.default?" selected":""}>true</option><option${!f.default?" selected":""}>false</option></select>`
@@ -336,40 +318,37 @@ function collectWorkload(){
   });
   return wl;
 }
-// [memory.l2.sim_max_accesses, label]; 0 = no cap (always the whole kernel)
+// same [memory.l2.sim_max_accesses, label] scale as the single-run wizard's — see app.html
 const SIM_WIN=[[2e5,"200k accesses/kernel — fast, coarse"],[5e5,"500k accesses/kernel"],[1e6,"1M accesses/kernel"],
-  [2e6,"2M accesses/kernel (default)"],[5e6,"5M accesses/kernel"],[1e7,"10M accesses/kernel"],
-  [2e7,"20M accesses/kernel — slow"],[0,"no cap: always the whole kernel — slowest, exact"]];
+  [2e6,"2M accesses/kernel"],[5e6,"5M accesses/kernel"],[1e7,"10M accesses/kernel"],
+  [2e7,"20M accesses/kernel — slow"],[0,"no cap: always the whole kernel — slowest, exact (default here)"]];
 function simWinLabel(){ const e=$("simwin"); if(e) $("simwinv").textContent=SIM_WIN[+e.value][1]; }
-async function run(){
-  go(4); $("log").textContent=""; $("fill").style.width="2%";
+
+function buildConfig(){
   const wl=collectWorkload();
   const cfg={gpuTilingPerfHWModel:GPU, workload:wl};
   if($("cmpattn")?.checked) cfg.compare_attention=true;
   cfg.sim_max_accesses=SIM_WIN[+$("simwin").value][0];
   if(GPU_CONFIG_MODE==="slice") cfg.slice_cfg=collectSlice();
   else { const y=$("gpuTilingPerfHWModelYaml").value.trim(); if(y) cfg.gpuTilingPerfHWModelYaml=y; }
-  // phase "both" (default) runs prefill+decode together, one job, and the results page below
-  // shows both as tabs; picking "decode" or "prefill" instead runs just that one phase.
   const mode = (wl.run && wl.run.phase==="both") ? "workload_both" : "workload";
-  const t0=performance.now();
+  return {cfg, mode};
+}
+async function createJob(){
+  const btn=$("submitbtn");
+  btn.disabled=true;
+  $("submitmsg").innerHTML="submitting…";
   try{
-    const r=await fetch(API+"/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({mode,config:cfg})});
-    const {job_id}=await r.json(); JOB=job_id;
-    let j;
-    do{
-      await new Promise(s=>setTimeout(s,200));
-      j=await (await fetch(API+"/api/jobs/"+job_id)).json();
-      const frac=j.total?Math.min(0.98,j.done/j.total):0.05;
-      $("fill").style.width=(100*Math.max(0.02,frac)).toFixed(1)+"%";
-      $("plabel").textContent=`${j.done}/${j.total} · ${j.where||""} · ${((performance.now()-t0)/1000).toFixed(1)}s`;
-      $("log").textContent=(j.log||[]).join("\n"); $("log").scrollTop=1e6;
-    }while(j.state==="running");
-    $("fill").style.width="100%";
-    if(j.state==="error"){ $("log").innerHTML=`<span class="err">${j.error}\n\n${j.trace||""}</span>`; return; }
-    showResults(j.result,(performance.now()-t0)/1000); go(5);
-  }catch(e){ $("log").innerHTML=`<span class="err">${e}</span>`; }
+    const {cfg, mode}=buildConfig();
+    const r=await fetch(API+"/api/regr/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:$("jobname").value, tag:$("jobtag").value, mode, config:cfg})});
+    const j=await r.json();
+    if(!r.ok){ $("submitmsg").innerHTML=`<span class="err">${esc(j.error||"failed")}</span>`; btn.disabled=false; return; }
+    $("submitmsg").innerHTML=`<span style="color:var(--ok)">job #${j.job_id} queued — taking you to the dashboard…</span>`;
+    setTimeout(()=>{ location.href="/regr"; }, 700);
+  }catch(e){
+    $("submitmsg").innerHTML=`<span class="err">${esc(String(e))}</span>`; btn.disabled=false;
+  }
 }
 init();
 </script>

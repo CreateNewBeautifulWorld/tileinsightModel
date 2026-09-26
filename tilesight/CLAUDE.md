@@ -82,6 +82,14 @@ tilesight/                   (this directory - both the project root and the pac
       port) -> out/memmap/*.csv|xlsx|txt and the results page's address-map section
     out/                        the real output: where a run's generated trace/xlsx/pdf/svg
                                 files land (git-ignored except a .gitkeep; created on demand)
+    regr/                       persisted regression jobs (a queue behind html/regr*.html, not
+                                the interactive wizard's ephemeral /api/jobs): store.py (RegrStore
+                                — pending/running/done/error, name + free-text tag, capped at 100,
+                                oldest auto-pruned; registry.json, git-ignored) and worker.py (one
+                                background thread, serial FIFO, `build_report_json()` — same as an
+                                interactive run — then writes the result and a copy of whatever
+                                the model produced under out/ into that job's own regr/jobs/<id>/;
+                                also git-ignored)
   gpuPresets/                 GPU YAML presets (b200.yaml, b300.yaml, h200.yaml, mi300x.yaml, ...)
                               — data only, read by gpuTilingPerfHWModel/interfaceAndRun/hardware_spec.py
   modelPresets/               model architecture presets (kimi_k2.hf.json, llama2_7b.hf.json, ...)
@@ -89,13 +97,38 @@ tilesight/                   (this directory - both the project root and the pac
   cli/cli.py, cli/server.py   the two ways to drive the tool: `python -m tilesight.cli.cli`
                               (also the `tilesight` console script) and the stdlib HTTP server
                               (/api/options, /api/jobs, async + progress; modes: kernel (single
-                              GPU) | run | request | sweep | need). Both import
-                              gpuTilingPerfHWModel/interfaceAndRun and call run() — neither
-                              reaches into model/ directly.
+                              GPU) | run | request | sweep | need — plus /api/regr/jobs, the
+                              persisted regression-job queue, see gpuTilingPerfHWModel/regr/
+                              above). Both import gpuTilingPerfHWModel/interfaceAndRun and call
+                              run() — neither reaches into model/ directly.
+  cli/report_json.py         "run one job, return its results-page JSON" — pulled out of
+                              server.py so an ephemeral wizard job and a persisted regression job
+                              (gpuTilingPerfHWModel/regr/worker.py) both call the same
+                              `build_report_json(mode, cfg, prog)` and never drift apart.
   html/index.html, html/app.html   self-contained UI (no CDN/fonts/external requests) served by
                               cli/server.py — keep it that way. Each has a #buildOverlay banner
                               that polls /api/build_status on load and hides once the C++ core
                               is ready (or shows the build error) — see cli/server_boot.py.
+  html/results.js             the results-page renderer (Gantt, HBM address map, tables),
+                              shared by app.html and regr_result.html so their two independent
+                              "how a run's JSON becomes a page" logics can't drift; each page
+                              sets its own `DL` (download-link) functions before calling
+                              `showResults()`, since app.html regenerates a trace/memmap file on
+                              demand while regr_result.html links to one the worker already wrote.
+  html/regr.html               page 1: the regression-job dashboard (id/name/tag/status/
+                              submitted-by/timestamps, polls /api/regr/jobs) and a
+                              "create new job" link.
+  html/regr_new.html           page 2: create a regression job — its own page, not a call into
+                              page 1 or app.html (same GPU/hardware/workload steps as app.html,
+                              duplicated rather than shared since this page's final step differs:
+                              name + tag, then POST /api/regr/jobs and back to the dashboard,
+                              instead of running inline). Defaults the cache-simulation-window
+                              slider to "no cap" (the whole kernel), since a regression job runs
+                              in the background anyway and accuracy matters more than turnaround.
+  html/regr_result.html        page 3: one regression job's results, once done — same
+                              results.js renderer as app.html, pointed at that job's own
+                              regr/jobs/<id>/ files via /api/regr/file instead of the ephemeral
+                              job cache.
   cli/server_boot.py         `serve`'s real entry point (cli.py delegates to it): binds the
                               socket and serves html/ + /api/build_status immediately, builds
                               tilesight._core in a background thread, then swaps in

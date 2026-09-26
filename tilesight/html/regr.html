@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TileSight — regression jobs</title>
+<style>
+  :root{--bg:#fbfbfa;--panel:#fff;--ink:#1d1c1a;--muted:#6b6a67;--line:#e3e1dd;--accent:#b4552d;
+    --soft:#f4ece7;--ok:#2f7d54;--warn:#b3261e;--mono:ui-monospace,Menlo,Consolas,monospace;
+    box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161514;--panel:#1f1e1c;
+    --ink:#ece9e4;--muted:#a09d97;--line:#33312e;--accent:#e0794c;--soft:#2a221d;--ok:#6cc08b;--warn:#f0857d}}
+  *,*::before,*::after{box-sizing:inherit}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{max-width:1120px;margin:0 auto;padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  h1{font-size:19px;margin:0}
+  main{max-width:1120px;margin:0 auto;padding:16px 20px 60px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 12px}
+  button,a.go{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);
+    border-radius:7px;padding:7px 9px;cursor:pointer;text-decoration:none;display:inline-block}
+  button.go,a.go{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;padding:9px 20px}
+  button.ghost{padding:6px 12px;font-size:12.5px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase}
+  tr:hover td{background:var(--soft)}
+  .mono{font-family:var(--mono);font-size:11.5px}
+  .hint{font-size:12px;color:var(--muted)} .err{color:var(--warn);font-family:var(--mono);font-size:12px}
+  .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;text-transform:capitalize}
+  .badge.pending{background:var(--soft);color:var(--muted)}
+  .badge.running{background:#fdf0d5;color:#95610f}
+  .badge.done{background:#e4f3ea;color:var(--ok)}
+  .badge.error{background:#fbe4e2;color:var(--warn)}
+  @media (prefers-color-scheme:dark){
+    .badge.running{background:#3a2c12;color:#f0b862} .badge.done{background:#173225;color:var(--ok)}
+    .badge.error{background:#3a1e1c;color:var(--warn)}}
+  .tagpill{display:inline-block;font-size:11px;background:var(--soft);color:var(--muted);border-radius:10px;padding:1px 7px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+  .row{display:flex;gap:8px;align-items:center}
+  .name{max-width:200px;overflow:hidden;text-overflow:ellipsis}
+</style>
+</head>
+<body>
+<div id="buildOverlay" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;
+  align-items:center;justify-content:center;text-align:center;padding:20px">
+  <style>@keyframes buildspin{to{transform:rotate(360deg)}}</style>
+  <div style="max-width:420px">
+    <div id="buildSpin" style="width:22px;height:22px;border:3px solid var(--accent);
+      border-right-color:transparent;border-radius:50%;margin:0 auto 14px;
+      animation:buildspin .7s linear infinite"></div>
+    <div id="buildMsg" style="font-size:14px">Checking tilesight core…</div>
+    <div id="buildDetail" class="hint" style="margin-top:8px;white-space:pre-wrap"></div>
+  </div>
+</div>
+<script>
+(function(){
+  var overlay=document.getElementById('buildOverlay'),spin=document.getElementById('buildSpin'),
+      msg=document.getElementById('buildMsg'),detail=document.getElementById('buildDetail');
+  function poll(){
+    fetch('/api/build_status').then(function(r){return r.json()}).then(function(st){
+      if(st.stage==='ready'){ overlay.style.display='none'; return; }
+      if(st.stage==='error'){ spin.style.display='none'; msg.textContent='C++ core failed to build.';
+        msg.className='err'; detail.textContent=st.message||''; return; }
+      msg.textContent='Building the C++ core (first run only, ~1–2 min)…'; detail.textContent=st.message||'';
+      setTimeout(poll, 1200);
+    }).catch(function(){ setTimeout(poll, 800); });
+  }
+  poll();
+})();
+</script>
+<header>
+  <h1>TileSight — regression jobs</h1>
+  <div class="row">
+    <a class="go" href="/regr/new">+ create new job</a>
+    <a href="/app" class="hint" style="align-self:center">single-run wizard →</a>
+  </div>
+</header>
+<main>
+<div class="panel">
+  <h2>jobs <span id="count" class="hint" style="text-transform:none;letter-spacing:normal"></span></h2>
+  <div class="hint" style="margin-bottom:10px">Each job runs the model exactly once, one at a time, in the
+    background — so a long, wide-search-window regression run never competes with someone using the
+    interactive wizard. At most 100 are kept; the oldest finished ones are dropped automatically as new
+    ones come in.</div>
+  <div class="scroll" style="overflow-x:auto"><table id="tbl"><thead><tr>
+    <th>id</th><th>name</th><th>tag</th><th>status</th><th>gpu</th><th>phase</th><th>by</th>
+    <th>submitted</th><th>completed</th><th></th>
+  </tr></thead><tbody id="rows"><tr><td colspan="10" class="hint">loading…</td></tr></tbody></table></div>
+</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const API=location.origin.startsWith("http")?location.origin:"http://127.0.0.1:8000";
+function since(iso){
+  if(!iso) return "—";
+  const d=new Date(iso), s=(Date.now()-d.getTime())/1000;
+  if(s<60) return "just now";
+  if(s<3600) return Math.floor(s/60)+"m ago";
+  if(s<86400) return Math.floor(s/3600)+"h ago";
+  return d.toLocaleString();
+}
+async function del(id){
+  if(!confirm("Delete regression job "+id+" and its output?")) return;
+  await fetch(API+"/api/regr/jobs/"+id,{method:"DELETE"});
+  load();
+}
+async function load(){
+  const r=await fetch(API+"/api/regr/jobs");
+  const j=await r.json();
+  $("count").textContent=`(${j.jobs.length}/${j.max_jobs})`;
+  if(!j.jobs.length){
+    $("rows").innerHTML=`<tr><td colspan="10" class="hint">no regression jobs yet — <a href="/regr/new">create one</a>.</td></tr>`;
+    return;
+  }
+  $("rows").innerHTML=j.jobs.map(row=>{
+    const view = row.status==="done" ? `<a href="/regr/result?job=${row.id}">view →</a>`
+      : row.status==="error" ? `<span class="err" title="${esc(row.error||"")}">${esc((row.error||"failed").slice(0,40))}</span>`
+      : row.status==="running" ? `<span class="hint">${row.done}/${row.total} · ${esc(row.label||"")}</span>` : "";
+    return `<tr>
+      <td class="mono">${row.id}</td>
+      <td class="name" title="${esc(row.name)}">${esc(row.name)}</td>
+      <td>${row.tag?`<span class="tagpill" title="${esc(row.tag)}">${esc(row.tag)}</span>`:""}</td>
+      <td><span class="badge ${row.status}">${esc(row.status)}</span></td>
+      <td class="mono">${esc(row.gpu)}</td>
+      <td class="mono">${esc(row.phase)}</td>
+      <td>${esc(row.submitted_by)}</td>
+      <td title="${esc(row.submitted_at)}">${since(row.submitted_at)}</td>
+      <td title="${esc(row.completed_at||"")}">${since(row.completed_at)}</td>
+      <td>${view} <button class="ghost" onclick="del(${row.id})" title="delete">✕</button></td>
+    </tr>`;
+  }).join("");
+}
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>
