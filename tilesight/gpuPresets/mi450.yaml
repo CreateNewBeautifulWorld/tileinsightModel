@@ -43,7 +43,7 @@ memory:
     capacity_derate: 1.0    # DEFAULT: no loss. Lower it only with a measurement to back it up.
     partitions: 8        # [calib] independent L2 partitions (tile-level LRU each)
     policy: lru
-    waves_simulated: 2
+    waves_simulated: 0
     blocks: 8            # [calib] independent L2 blocks, each with its own port(s)
     ports_per_block: 1
     bytes_per_clk_per_port: 2048   # [calib]

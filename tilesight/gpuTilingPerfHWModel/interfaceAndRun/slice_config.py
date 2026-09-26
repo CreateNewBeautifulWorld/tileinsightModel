@@ -277,7 +277,7 @@ def to_hardware_spec(cfg: dict) -> HardwareSpec:
             "l2": {"capacity_MB": max(0.001, l2_mb), "capacity_derate": 1.0,
                    "bandwidth_TBps": max(d["l2_TBps"], d["upstream_read_TBps"]),
                    "latency_ns": sget(cfg, "memory_slice.l2_latency_cycles") / f_ghz,
-                   "partitions": mslices, "policy": "lru", "waves_simulated": 2,
+                   "partitions": mslices, "policy": "lru", "waves_simulated": 0,
                    "blocks": mslices, "ports_per_block": 1,
                    "bytes_per_clk_per_port": sget(cfg, "memory_slice.l2_bytes_per_clk"),
                    "line_bytes": 128, "sector_bytes": 32,

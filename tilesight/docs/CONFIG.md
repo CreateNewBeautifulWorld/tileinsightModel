@@ -66,7 +66,9 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 | `memory.l2.partitions` | int | count | `1` | spec | Independent partitions, each a tile-level cache; a tile goes to the one its address maps to |
 | `memory.l2.policy` | str | — | `lru` | policy | Replacement: lru | fifo | mru |
 | `memory.l2.model` | str | — | `lru` | policy | lru = deterministic tile simulation (default) | sdcm = the paper's probabilistic model |
-| `memory.l2.waves_simulated` | int | count | `2` | policy | Waves replayed in the simulation; >1 makes cross-wave reuse visible |
+| `memory.l2.waves_simulated` | int | count | `0` | policy | Waves the L2/L1/buffer simulation replays (0 = every wave of the kernel). Fewer is faster but hides cross-wave reuse and capacity evictions |
+| `memory.l2.ksteps_simulated` | int | count | `0` | policy | K-loop steps replayed per wave (0 = all). Cutting K hides hugepage reuse: the first step into a DMA page pays for it, the next ones are free |
+| `memory.l2.sim_max_accesses` | float | count | `2000000.0` | policy | Budget of simulated tile accesses per kernel (0 = no cap). Over it, waves are dropped first, K steps last. Each kernel's meta.sim_coverage says how much of it was replayed |
 | `memory.l2.assoc` | int | ways | `16` | calib | Associativity (only used by the sdcm model) |
 | `memory.l2.slices` | int | count | `0` | calib | Slices for the address map (0 = 8 per die) |
 | `memory.l2.blocks` | int | count | `0` | calib | Independent L2 blocks, each with its own load/store port (0 = do not port-cap) |
@@ -199,7 +201,7 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 |---|---|---|---|---|---|
 | `memory.dma.engines` | int | count | `1` | spec | Copy engines; a DMA can move data from any HBM channel to any memory slice, so this is a flat GPU-wide count, not per-slice. Feeds dma_engine_limited_rate's concurrency cap (with hugepage_KB and outstanding.dma_per_engine_lines also set) |
 | `memory.dma.destination` | str | — | `smem` | policy | Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass |
-| `memory.dma.hugepage_KB` | float | KB | `0` | calib | Fixed size of one DMA operation: a DMA moves exactly one hugepage, never less (0 = unset: fall back to an occupancy proxy for L2/DDR slice spread; NVIDIA DMA/TMA moves 2048). Splits evenly across every memory slice by construction; if it doesn't divide evenly by memory.addressing.l2's granularity x port count (e.g. 2048 over 12 ports), it is padded up to what the fullest slice would get, never rejected or underestimated. Also changes the L2 simulation's cache atom (for GEMM A/B and attention K/V) to hugepage granularity, so real reuse across loop iterations shows up as a hit instead of a fresh miss every call |
+| `memory.dma.hugepage_KB` | float | KB | `0` | calib | Fixed size of one DMA operation, matching the 2 MB huge page: a DMA moves exactly one hugepage, never less (0 = off: tile-granular L2 and an occupancy proxy for slice spread). Splits evenly across every memory slice by construction; if it doesn't divide evenly by memory.addressing.l2's granularity x port count (e.g. 2048 over 12 ports), it is padded up to what the fullest slice would get. The L2 and shared-buffer simulations then hold pages, one shard per slice, refilled into every slice on a miss (GEMM A/B, attention K/V); L1 stays tile-granular |
 
 ## load_paths
 
@@ -233,4 +235,4 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 |---|---|---|---|---|---|
 | `runtime.launch_overhead_us` | float | us | `2.0` | calib | Per-kernel launch cost; ~0.5-1 with CUDA graphs |
 
-Total: 131 fields (62 spec, 37 calib, 20 policy, 12 loss).
+Total: 133 fields (62 spec, 37 calib, 22 policy, 12 loss).

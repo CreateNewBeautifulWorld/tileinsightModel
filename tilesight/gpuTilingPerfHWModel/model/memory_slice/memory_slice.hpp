@@ -15,9 +15,11 @@ namespace tilesight::memory_slice {
 double mem_latency_s(double l2_latency_ns, double ddr_latency_ns, double miss, bool has_l2);
 
 // Run a tile-access stream through the memory slices' L2s (one partition per slice).
+// `page_fill`: keys are DMA hugepages spread over every partition (see cache::simulate).
 cache::SimResult simulate_l2(const std::vector<int64_t>& keys, const std::vector<int64_t>& addrs,
                              const std::vector<double>& sizes, const std::vector<int>& streams,
                              int n_streams, double l2_capacity_bytes, int n_partitions,
-                             const cache::AddrCfg& l2_addr_cfg, const std::string& policy);
+                             const cache::AddrCfg& l2_addr_cfg, const std::string& policy,
+                             bool page_fill = false);
 
 }  // namespace tilesight::memory_slice

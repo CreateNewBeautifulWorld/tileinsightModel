@@ -132,6 +132,17 @@
   <div id="wlform"></div>
   <label style="display:flex;gap:8px;align-items:center;margin-top:12px">
     <input type="checkbox" id="cmpattn" style="width:auto"> also run it without flash attention, for comparison</label>
+  <div style="margin-top:14px">
+    <label for="simwin"><b>Cache simulation window</b>: <span id="simwinv"></span></label>
+    <input type="range" id="simwin" min="0" max="7" step="1" value="3" oninput="simWinLabel()" style="width:100%">
+    <div class="hint">How much of each kernel the L2 / on-chip-buffer / L1 simulation replays, tile access by
+      tile access. By default the <b>whole kernel</b> (every wave, every K step) up to this many accesses per
+      kernel; a kernel over it drops waves first and K steps last. A longer window is slower but more
+      accurate: capacity evictions (does the working set fit the L2, or the buffer every shader core shares)
+      and 2&nbsp;MB DMA-page reuse (the first K step into a page pays for all of it) only show up over a long
+      enough trace — a short one sees only the first, compulsory misses and extrapolates them.
+      The results show, per kernel, how much of it was actually replayed.</div>
+  </div>
   <div class="row"><button class="ghost" onclick="go(2)">Back</button><button class="go" onclick="run()">Run model</button></div>
 </section>
 
@@ -231,6 +242,7 @@ async function init(){
   OPTS=await (await fetch(API+"/api/options")).json();
   SCHEMA=await (await fetch(API+"/api/schema")).json();
   SLICE=await (await fetch(API+"/api/slice_schema")).json();
+  simWinLabel();
   $("gpucards").innerHTML = OPTS.hardware.map(h=>
     `<div class="card${h===GPU?' sel':''}" data-gpu="${h}" onclick="pick('${h}')">
        <b>${h.toUpperCase()}</b><span id="d_${h}">…</span></div>`).join("") +
@@ -315,11 +327,17 @@ function collectWorkload(){
   });
   return wl;
 }
+// [memory.l2.sim_max_accesses, label]; 0 = no cap (always the whole kernel)
+const SIM_WIN=[[2e5,"200k accesses/kernel — fast, coarse"],[5e5,"500k accesses/kernel"],[1e6,"1M accesses/kernel"],
+  [2e6,"2M accesses/kernel (default)"],[5e6,"5M accesses/kernel"],[1e7,"10M accesses/kernel"],
+  [2e7,"20M accesses/kernel — slow"],[0,"no cap: always the whole kernel — slowest, exact"]];
+function simWinLabel(){ const e=$("simwin"); if(e) $("simwinv").textContent=SIM_WIN[+e.value][1]; }
 async function run(){
   go(4); $("log").textContent=""; $("fill").style.width="2%";
   const wl=collectWorkload();
   const cfg={gpuTilingPerfHWModel:GPU, workload:wl};
   if($("cmpattn")?.checked) cfg.compare_attention=true;
+  cfg.sim_max_accesses=SIM_WIN[+$("simwin").value][0];
   if(GPU_CONFIG_MODE==="slice") cfg.slice_cfg=collectSlice();
   else { const y=$("gpuTilingPerfHWModelYaml").value.trim(); if(y) cfg.gpuTilingPerfHWModelYaml=y; }
   // phase "both" (default) runs prefill+decode together, one job, and the results page below
@@ -451,6 +469,11 @@ function renderPhaseBody(r){
     <div class="kpi"><b>${m.total_GB.toFixed(1)} GB</b><span>memory / GPU</span></div>
     <div class="kpi"><b>${r.bounds.by_resource[0]?.name||"—"}</b><span>top bound</span></div>
     <div class="kpi"><b>${secs.toFixed(1)} s</b><span>compute time</span></div></div>
+  ${r.sim_window&&r.sim_window.kernels?`<div class="hint" style="margin:-4px 0 12px">cache simulation replayed
+    ${(100*r.sim_window.weighted).toFixed(1)}% of all tile accesses (time-weighted);
+    ${r.sim_window.full}/${r.sim_window.kernels} kernels in full${r.sim_window.min<0.999?`, least:
+    ${(100*r.sim_window.min).toFixed(1)}% of <span class="mono">${esc(r.sim_window.min_op)}</span>
+    — widen the window in step 3 for more`:""}.</div>`:""}
   <div class="row" style="margin:0 0 14px">
     <button class="ghost" onclick="downloadFile(this,API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE,'tilesight_cycles.xlsx')">trace Excel (per cycle, grouped by unit)</button>
     <button class="ghost" onclick="downloadFile(this,API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE+'&full=1','tilesight_cycles.xlsx')">Excel · whole kernel</button>

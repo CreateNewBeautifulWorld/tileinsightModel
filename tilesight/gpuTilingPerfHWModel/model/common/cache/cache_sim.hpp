@@ -29,9 +29,17 @@ struct SimResult {
 };
 
 // `part_of(addr)` maps a tile address to a partition index in [0, n_partitions).
+//
+// `page_fill` (DMA hugepage mode): a key is a whole page spread evenly over every partition, so
+// each partition holds only its own shard (`sizes[i] / n_partitions` bytes). An access looks up
+// the shard in the partition its address maps to; a miss there means the DMA fetches the whole
+// page again, which refills that page's shard in every partition (a partition already holding it
+// just refreshes it). Each partition still evicts on its own, so some slices can hold a page's
+// shard while others have already dropped theirs.
 SimResult simulate(const std::vector<int64_t>& keys, const std::vector<int64_t>& addrs,
                     const std::vector<double>& sizes, const std::vector<int>& streams, int n_streams,
                     double capacity_bytes, int n_partitions,
-                    const std::vector<int>& part_of_addr, const std::string& policy);
+                    const std::vector<int>& part_of_addr, const std::string& policy,
+                    bool page_fill = false);
 
 }  // namespace tilesight::cache

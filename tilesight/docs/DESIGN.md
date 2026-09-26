@@ -121,9 +121,23 @@ it. The tile is the atom (no cache lines). `memory.l2.partitions` independent pa
 hold whole tiles and run an explicit policy (`memory.l2.policy`: `lru` | `fifo` | `mru`); a tile
 goes to the partition **its address maps to** (`report.addressing.AddressMap`), so the layout /
 swizzle decides the balance and a power-of-two pitch really does pile everything into one
-partition. Capacity is in bytes, so different tile sizes compete honestly. The simulation
-replays `memory.l2.waves_simulated` waves (default 2), which is how cross-wave reuse became
-visible (the old one-wave window counted every re-read as a miss).
+partition. Capacity is in bytes, so different tile sizes compete honestly.
+
+**Simulation window.** By default the simulation replays the **whole kernel**: every wave, and in
+each wave every K step, all blocks of the wave stepping through their K loop in lockstep
+(`sim_window()` in `gpu_top.cpp`). It used to replay 2 waves x the first 4 K steps — 0.5% of an
+8192³ GEMM's accesses, 2% of a 4096x4096x7168 one — which never touches enough data to see a
+capacity eviction in a 132 MB L2 (or in a buffer shared by every shader core), only compulsory
+misses, and then extrapolated those. `memory.l2.waves_simulated` / `.ksteps_simulated` (0 = all)
+can shorten it deliberately; `memory.l2.sim_max_accesses` (default 2e6 tile accesses per
+kernel, ~0.2-0.4 s) caps the cost, and when a kernel is over budget waves are dropped first (the
+waves of one kernel are close to statistically alike) and K steps only last (cutting K is what
+biases a hugepage trace — see below). Every kernel reports `meta.sim_coverage` (simulated /
+total accesses). Attention replays the same way over the **real KV-cache layout**
+(`[B][kv_heads][kv tiles]`, K then V per tile): the query heads of a GQA group and the query
+tiles of a head walk the same addresses, so they share tiles the way the hardware does — the
+old attention trace gave every access a fresh synthetic address in replay order. The whole
+test suite takes ~10 min instead of ~40 s; the model is meant to be accurate first.
 
 Output is not just a miss fraction: `SimResult` gives per-partition residency (exactly which
 tiles are still in L2), occupancy and eviction counts — printed by `tilesight kernel` and shown
@@ -187,10 +201,10 @@ position: every access's real address is generated from the tile geometry, so `A
 already gives the exact set/partition for every access. With that, there's nothing left to
 estimate — `cache_sim.cpp`'s per-partition LRU directly computes whether enough same-set tiles
 really did land within the reuse window, which is the deterministic answer Eqs. 7–10 exist to
-approximate when the real mapping isn't known. The one approximation that *does* remain here is
-unrelated to probability: `keys`/`addrs`/`sizes` are built from a **sampled window** of the full
-iteration space (`ksteps = min(iters, 4)`, waves capped by `memory.l2.waves_simulated`), not the
-whole trace, for tile-search performance — a coverage limit, not a statistical model.
+approximate when the real mapping isn't known. The one approximation that *can* remain here is
+unrelated to probability: a kernel over `memory.l2.sim_max_accesses` is replayed over fewer waves
+(or, last, fewer K steps) than it really has — a coverage limit, reported per kernel as
+`meta.sim_coverage`, not a statistical model.
 
 **L2/DDR bandwidth is not one GPU-wide pool.** §2's `l2`/`ddr` lanes model the *configured
 aggregate* bandwidth, fair-shared across active cores (`shader_core::per_core_rate`) — but
@@ -252,6 +266,32 @@ falsely `ddr`-bound 63.7ms — about 200x. Keying the cache itself by hugepage i
 the source, because reuse across iterations is now a real, simulated hit rather than something the
 billing formula has to guess at after the fact. See
 `tests/test_paths_addr_buffer.py::test_dma_hugepage_keys_the_l2_simulation_instead_of_rounding_after_the_fact`.
+
+Three more things the hugepage trace needs to be right, each found by turning it on for every
+preset and chasing the failures:
+- **The window must cover the K loop.** A page holds many K steps' worth of one operand (2 rows of
+  A x 128 K steps for an 8192³ FP8 GEMM). The first step into it pays the whole page, the next
+  127 are free; the old 4-step window saw the expensive steps and extrapolated them — 3.4 GB of
+  DDR for a 67 MB operand. Over the full K loop it is 107 MB, identical to the tile-granular
+  trace, and the GEMM is `tc`-bound again. Hence the whole-kernel window above.
+- **A page lives in every L2 partition, one shard each.** Routing the whole page to the partition
+  of whichever tile happened to touch it put one page in several partitions, each charged as its
+  own 2 MB miss (a streamed decode weight: 235 MB of DDR for 117 MB of weight). `cache::simulate`'s
+  `page_fill` mode stores `hugepage/n_partitions` per partition, looks the shard up in the
+  partition the tile's address maps to, and on a miss refills every partition's shard (the DMA
+  moved the whole page); each partition still evicts on its own.
+- **L1 stays tile-granular.** L1 caches LSU loads, not DMA pages; a 2 MB entry can never fit a
+  ~42 KB L1, so reusing the page-keyed trace for it silently switched L1 off. `lower_gemm` keeps a
+  tile-keyed copy of the access stream (`tkeys`/`tsizes`) for L1.
+
+**Open: why this is not the default yet.** With every fix above, one case still disagrees with
+measured hardware by an order of magnitude: long-context decode attention (Kimi-K2, batch 256, seq
+8192, dp 8) goes 57 µs -> 1137 µs, 91% KV miss. ~320 concurrent blocks each stream their own KV
+page and stay in it for ~26 steps of 73 KB; "a DMA always moves the whole 2 MB page" then needs
+320 x 2 MB = 640 MB resident at once against a 132 MB L2, so LRU thrashes and nearly every 73 KB
+step refetches 2 MB. Real decode-MLA kernels read KV at ~90% of HBM bandwidth, so the literal
+"every DMA transfer is 2 MB" reading does not hold for streaming tile loads; 2 MB is at least the
+allocation / address-translation granularity. Until that is settled, `hugepage_KB` defaults to 0.
 
 The shared on-chip buffer's residency (§4's "on-chip buffer's residency" above) uses this same
 hugepage-keyed trace now too, not just L2/gload. **Still deliberately out of scope**: Z-order/

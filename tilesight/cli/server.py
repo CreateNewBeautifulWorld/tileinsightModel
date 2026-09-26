@@ -109,12 +109,16 @@ def _load_model(cfg: dict) -> ModelSpec:
 
 
 def _load_hw(cfg: dict) -> HardwareSpec:
+    # the results page's "cache simulation window" slider (memory.l2.sim_max_accesses; 0 = no cap)
+    sim = {"memory.l2.sim_max_accesses": float(cfg["sim_max_accesses"])} \
+        if cfg.get("sim_max_accesses") is not None else {}
     sl = cfg.get("slice_cfg")
     if sl:
         probs = validate_slice_config(sl)
         if probs:
             raise ValueError("gpu config: " + "; ".join(probs[:5]))
-        return to_hardware_spec(sl)
+        hw = to_hardware_spec(sl)
+        return hw.override(sim) if sim else hw
     text = (cfg.get("gpuTilingPerfHWModelYaml") or "").strip()
     if text:
         import yaml as _yaml
@@ -139,6 +143,7 @@ def _load_hw(cfg: dict) -> HardwareSpec:
             v = json.loads(v)
         if v not in (None, "", {}):
             ov[path] = v
+    ov.update(sim)
     return cur_gpu_config.override(ov) if ov else cur_gpu_config
 
 
@@ -186,6 +191,20 @@ def _model_json(rep) -> dict:
             "bounds": _bounds_json(rep), "ops": _ops_json(rep)}
 
 
+def _sim_window_json(rep, cur_gpu_config) -> dict:
+    """How much of each kernel the cache simulation replayed (meta.sim_coverage), time-weighted."""
+    cov = [(k.meta.get("sim_coverage"), o.total_s, o.op.name) for o in rep.ops for k in o.kernels
+           if k.meta.get("sim_coverage") is not None]
+    if not cov:
+        return {}
+    tot = sum(t for _, t, _ in cov) or 1.0
+    worst = min(cov, key=lambda c: c[0])
+    return {"budget": cur_gpu_config.get("memory.l2.sim_max_accesses"),
+            "weighted": sum(c * t for c, t, _ in cov) / tot,
+            "min": worst[0], "min_op": worst[2],
+            "full": sum(1 for c, _, _ in cov if c >= 0.999), "kernels": len(cov)}
+
+
 def _workload_report_json(rep, wl: dict, cur_gpu_config, cfg: dict, prog) -> dict:
     """Everything the results page shows for one phase's report — shared by the single-phase
     "workload" mode and the prefill+decode "workload_both" mode (one call per phase)."""
@@ -201,6 +220,7 @@ def _workload_report_json(rep, wl: dict, cur_gpu_config, cfg: dict, prog) -> dic
         out["derived"] = slice_derive(cfg["slice_cfg"])
     out["arch_svg"] = arch_svg(cur_gpu_config)
     out["gpu_name"] = cur_gpu_config.name
+    out["sim_window"] = _sim_window_json(rep, cur_gpu_config)
     # attach the heaviest kernel's timeline so the Excel / CSV / PDF downloads AND the inline
     # Gantt view on the results page work
     prog(1, 1, "building the trace of the heaviest kernel")

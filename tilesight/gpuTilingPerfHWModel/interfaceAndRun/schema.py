@@ -113,8 +113,15 @@ FIELDS: tuple[Field, ...] = (
     F("memory.l2.policy", "str", "", "lru", "policy", "memory.l2", "Replacement: lru | fifo | mru"),
     F("memory.l2.model", "str", "", "lru", "policy", "memory.l2",
       "lru = deterministic tile simulation (default) | sdcm = the paper's probabilistic model"),
-    F("memory.l2.waves_simulated", "int", "count", 2, "policy", "memory.l2",
-      "Waves replayed in the simulation; >1 makes cross-wave reuse visible"),
+    F("memory.l2.waves_simulated", "int", "count", 0, "policy", "memory.l2",
+      "Waves the L2/L1/buffer simulation replays (0 = every wave of the kernel). Fewer is faster "
+      "but hides cross-wave reuse and capacity evictions"),
+    F("memory.l2.ksteps_simulated", "int", "count", 0, "policy", "memory.l2",
+      "K-loop steps replayed per wave (0 = all). Cutting K hides hugepage reuse: the first step "
+      "into a DMA page pays for it, the next ones are free"),
+    F("memory.l2.sim_max_accesses", "float", "count", 2e6, "policy", "memory.l2",
+      "Budget of simulated tile accesses per kernel (0 = no cap). Over it, waves are dropped first, "
+      "K steps last. Each kernel's meta.sim_coverage says how much of it was replayed"),
     F("memory.l2.assoc", "int", "ways", 16, "calib", "memory.l2", "Associativity (only used by the sdcm model)"),
     F("memory.l2.slices", "int", "count", 0, "calib", "memory.l2", "Slices for the address map (0 = 8 per die)"),
     F("memory.l2.blocks", "int", "count", 0, "calib", "memory.l2",
@@ -275,13 +282,13 @@ FIELDS: tuple[Field, ...] = (
     F("memory.dma.destination", "str", "", "smem", "policy", "memory.dma",
       "Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass"),
     F("memory.dma.hugepage_KB", "float", "KB", 0, "calib", "memory.dma",
-      "Fixed size of one DMA operation: a DMA moves exactly one hugepage, never less (0 = unset: "
-      "fall back to an occupancy proxy for L2/DDR slice spread; NVIDIA DMA/TMA moves 2048). Splits "
-      "evenly across every memory slice by construction; if it doesn't divide evenly by "
+      "Fixed size of one DMA operation, matching the 2 MB huge page: a DMA moves exactly one "
+      "hugepage, never less (0 = off: tile-granular L2 and an occupancy proxy for slice spread). "
+      "Splits evenly across every memory slice by construction; if it doesn't divide evenly by "
       "memory.addressing.l2's granularity x port count (e.g. 2048 over 12 ports), it is padded up "
-      "to what the fullest slice would get, never rejected or underestimated. Also changes the L2 "
-      "simulation's cache atom (for GEMM A/B and attention K/V) to hugepage granularity, so real "
-      "reuse across loop iterations shows up as a hit instead of a fresh miss every call"),
+      "to what the fullest slice would get. The L2 and shared-buffer simulations then hold pages, "
+      "one shard per slice, refilled into every slice on a miss (GEMM A/B, attention K/V); L1 "
+      "stays tile-granular"),
 
     # ---------------------------------------------------------------- load paths
     F("load_paths", "map", "", REQUIRED, "spec", "load_paths",

@@ -217,6 +217,44 @@ double hugepage_bytes(const HwView& hw, const cache::AddrCfg& cfg) {
   return static_cast<double>(per_slice) * n_slices * granularity;
 }
 
+// How much of a kernel the L2/L1/buffer simulations replay. By default the whole kernel: every
+// wave and every K step, because capacity effects (does the working set fit the L2 / the buffer
+// all the shader cores share) and hugepage reuse (the first K step into a page pays for it, the
+// following ones are free) only show up over a long enough trace — a short window sees only the
+// compulsory misses and extrapolates them. `memory.l2.waves_simulated` / `.ksteps_simulated`
+// (0 = all) can shorten it on purpose; `memory.l2.sim_max_accesses` caps the cost: over budget,
+// waves are dropped first (they are close to statistically alike) and K steps only last (cutting
+// K is what biases a hugepage trace). `coverage` = simulated / total accesses, reported in meta.
+struct SimWindow {
+  int64_t waves = 1, ksteps = 1;
+  double coverage = 1.0;
+};
+
+SimWindow sim_window(const HwView& hw, int64_t units, int64_t conc, int64_t iters, int per_step) {
+  conc = std::max<int64_t>(1, conc);
+  units = std::max<int64_t>(1, units);
+  iters = std::max<int64_t>(1, iters);
+  int64_t total_waves = (units + conc - 1) / conc;
+  int64_t w_cfg = static_cast<int64_t>(hw.get_num("memory.l2.waves_simulated", 0.0));
+  int64_t k_cfg = static_cast<int64_t>(hw.get_num("memory.l2.ksteps_simulated", 0.0));
+  SimWindow w;
+  w.waves = w_cfg > 0 ? std::min(w_cfg, total_waves) : total_waves;
+  w.ksteps = k_cfg > 0 ? std::min(k_cfg, iters) : iters;
+  auto accesses = [&](int64_t wv, int64_t ks) {
+    return static_cast<double>(std::min(units, conc * wv)) * static_cast<double>(ks) * per_step;
+  };
+  double budget = hw.get_num("memory.l2.sim_max_accesses", 0.0);
+  if (budget > 0) {
+    double per_wave = static_cast<double>(std::min(units, conc)) * static_cast<double>(w.ksteps) * per_step;
+    if (accesses(w.waves, w.ksteps) > budget)
+      w.waves = std::max<int64_t>(1, std::min(w.waves, static_cast<int64_t>(budget / per_wave)));
+    if (accesses(w.waves, w.ksteps) > budget)
+      w.ksteps = std::max<int64_t>(1, static_cast<int64_t>(budget / (static_cast<double>(std::min(units, conc)) * per_step)));
+  }
+  w.coverage = accesses(w.waves, w.ksteps) / (static_cast<double>(units) * static_cast<double>(iters) * per_step);
+  return w;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------- occupancy
@@ -302,34 +340,41 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   for (int64_t b_ = 0; b_ < batch; ++b_)
     for (int s_ = 0; s_ < sk; ++s_)
       for (auto [m, n] : order_all) full_order.push_back({b_, s_, m, n});
-  int64_t n_waves = std::min<int64_t>(static_cast<int64_t>(hw.get_num("memory.l2.waves_simulated", 1.0)),
-                                      std::max<int64_t>(1, (static_cast<int64_t>(full_order.size()) + conc - 1) / std::max<int64_t>(1, conc)));
+  SimWindow win = sim_window(hw, static_cast<int64_t>(full_order.size()), conc, iters, 2);
+  int64_t n_waves = win.waves;
   int64_t n_take = std::min<int64_t>(static_cast<int64_t>(full_order.size()), conc * n_waves);
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> order(full_order.begin(), full_order.begin() + n_take);
   double a_base = 0, b_base = M * K * ab * batch;
-  std::vector<int64_t> keys, addrs;
-  std::vector<double> sizes;
+  // keys/sizes: the L2 (and shared-buffer) atom — a whole DMA hugepage when one is configured,
+  // else one tile. tkeys/tsizes: always one tile, for L1, which caches LSU loads, not DMA pages.
+  std::vector<int64_t> keys, tkeys, addrs;
+  std::vector<double> sizes, tsizes;
   std::vector<int> streams;
-  int ksteps = static_cast<int>(std::min<int64_t>(iters, 4));
+  int64_t ksteps = win.ksteps;
   for (int64_t w = 0; w < n_waves; ++w) {
     int64_t lo = w * conc, hi = std::min<int64_t>(order.size(), (w + 1) * conc);
-    for (int kk = 0; kk < ksteps; ++kk) {
+    for (int64_t kk = 0; kk < ksteps; ++kk) {
       for (int64_t idx = lo; idx < hi; ++idx) {
         auto [b_, s_, m, n] = order[idx];
         int64_t k = s_ * iters + kk;
         int64_t a_addr = static_cast<int64_t>(a_base + ((b_ * mt + m) * kt + k) * a_tile);
         int64_t b_addr = static_cast<int64_t>(b_base + ((b_ * kt + k) * nt + n) * b_tile);
+        int64_t a_key = ((b_ * 4096 + m) * 65536 + k) * 2, b_key = ((b_ * 4096 + n) * 65536 + k) * 2 + 1;
         // With a hugepage configured, key the cache by hugepage index (not by loop index) so a
         // second access landing in an already-resident hugepage is a real hit in the simulation
         // — that is what lets miss_fraction() mean "how often a whole new hugepage is needed",
         // which gload then bills directly (miss * hugepage), instead of a raw per-tile miss rate.
-        keys.push_back(hp > 0 ? a_addr / static_cast<int64_t>(hp) : ((b_ * 4096 + m) * 65536 + k) * 2);
+        keys.push_back(hp > 0 ? a_addr / static_cast<int64_t>(hp) : a_key);
+        tkeys.push_back(a_key);
         addrs.push_back(a_addr);
         sizes.push_back(hp > 0 ? hp : a_tile);
+        tsizes.push_back(a_tile);
         streams.push_back(0);
-        keys.push_back(hp > 0 ? b_addr / static_cast<int64_t>(hp) : ((b_ * 4096 + n) * 65536 + k) * 2 + 1);
+        keys.push_back(hp > 0 ? b_addr / static_cast<int64_t>(hp) : b_key);
+        tkeys.push_back(b_key);
         addrs.push_back(b_addr);
         sizes.push_back(hp > 0 ? hp : b_tile);
+        tsizes.push_back(b_tile);
         streams.push_back(1);
       }
     }
@@ -340,7 +385,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   for (auto& [p, _] : paths)
     if (!hw.path_attr_bool(p, "smem_direct", true)) through_l1 = true;
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 2, hw.l2_capacity_bytes(),
-                                                    n_part, lmap, policy);
+                                                    n_part, lmap, policy, hp > 0);
   auto mf = sim.miss_fraction();
   double fa = mf[0], fb = mf[1];
 
@@ -356,8 +401,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     std::vector<int64_t> sk_, sa_;
     std::vector<double> ss_;
     std::vector<int> st_;
-    for (size_t i = 0; i < keys.size(); ++i)
-      if ((static_cast<int64_t>(i) / 2) % step == 0) { sk_.push_back(keys[i]); sa_.push_back(addrs[i]); ss_.push_back(sizes[i]); st_.push_back(streams[i]); }
+    for (size_t i = 0; i < tkeys.size(); ++i)
+      if ((static_cast<int64_t>(i) / 2) % step == 0) { sk_.push_back(tkeys[i]); sa_.push_back(addrs[i]); ss_.push_back(tsizes[i]); st_.push_back(streams[i]); }
     if (!sk_.empty()) {
       cache::AddrCfg zero_cfg;
       zero_cfg.mode = "interleave";
@@ -481,7 +526,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   meta["dtype"] = a_dt + "x" + b_dt + "->" + comp_dt;
   meta["occ_limiter"] = occ_lim; meta["regs_per_thread"] = rpt; meta["reg_spill_bytes"] = spill;
   meta["smem_per_block"] = static_cast<int64_t>(stages * stage + epi_smem);
-  meta["l2_waves_simulated"] = n_waves;
+  meta["l2_waves_simulated"] = n_waves; meta["l2_ksteps_simulated"] = ksteps;
+  meta["sim_coverage"] = win.coverage; meta["dma_hugepage_bytes"] = hp;
   meta["stage_share"] = std::make_tuple(share_a, share_b);
   meta["l1_capacity_KB"] = hw.l1_capacity_bytes() / 1024.0;
   meta["l1_miss"] = has_l1_miss ? nb::cast(std::vector<double>{l1_miss_a, l1_miss_b}) : nb::none();
@@ -595,34 +641,39 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
     for (int64_t h = 0; h < kv_heads; ++h)
       for (int64_t s = 0; s < splits; ++s)
         for (int64_t g = 0; g < groups; ++g) order.push_back({b, h, g, s});
-  int64_t cap = static_cast<int64_t>(hw.sms()) * resident;
-  if (static_cast<int64_t>(order.size()) > cap) order.resize(cap);
-  std::vector<int64_t> keys, addrs;
-  std::vector<double> sizes;
-  std::vector<int> streams;
-  double tile_b = k_tile + v_tile;
-  int itn = static_cast<int>(std::min<int64_t>(iters, 4));
-  for (int it = 0; it < itn; ++it)
-    for (auto [b, h, g, s] : order) {
-      (void)g;
-      keys.push_back((((b * 256 + h) * 4096 + s) * 4096 + it));
-      streams.push_back(0);
-    }
+  int64_t conc = static_cast<int64_t>(hw.sms()) * resident;
+  SimWindow win = sim_window(hw, static_cast<int64_t>(order.size()), conc, iters, 1);
+  int64_t n_take = std::min<int64_t>(static_cast<int64_t>(order.size()), conc * win.waves);
   cache::AddrCfg lmap = l2_addr_cfg(hw);
   double hp = hugepage_bytes(hw, lmap);
   double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
-  for (size_t i = 0; i < keys.size(); ++i) {
-    int64_t addr = static_cast<int64_t>(i * tile_b);
-    addrs.push_back(addr);
-    // K and V share one combined access unit here (one cache atom per (b,h,s,it)); keying by
-    // hugepage index (not loop index) makes a second access into an already-resident hugepage a
-    // real hit, same reasoning as lower_gemm.
-    if (hp > 0) { keys[i] = addr / static_cast<int64_t>(hp); sizes.push_back(hp); }
-    else sizes.push_back(tile_b);
+  std::vector<int64_t> keys, addrs;
+  std::vector<double> sizes;
+  std::vector<int> streams;
+  // The KV cache as it is laid out: [B][kv_heads][ntiles] tiles of tile_b bytes (one tile's K and
+  // V adjacent). The GQA groups of one KV head read the very same tiles, so they share addresses
+  // and keys — that is the reuse this simulation is for. Replayed wave by wave, every split
+  // stepping through its tiles in lockstep, like lower_gemm's K loop.
+  double tile_b = k_tile + v_tile;
+  for (int64_t w = 0; w < win.waves; ++w) {
+    int64_t lo = w * conc, hi = std::min<int64_t>(n_take, (w + 1) * conc);
+    for (int64_t it = 0; it < win.ksteps; ++it)
+      for (int64_t idx = lo; idx < hi; ++idx) {
+        auto [b, h, g, s] = order[idx];
+        (void)g;
+        int64_t t_idx = s * iters + it;
+        if (t_idx >= ntiles) continue;
+        int64_t tile_id = (b * kv_heads + h) * ntiles + t_idx;
+        int64_t addr = static_cast<int64_t>(tile_id * tile_b);
+        keys.push_back(hp > 0 ? addr / static_cast<int64_t>(hp) : tile_id);
+        addrs.push_back(addr);
+        sizes.push_back(hp > 0 ? hp : tile_b);
+        streams.push_back(0);
+      }
   }
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
-                                                    n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
+                                                    n_part, lmap, hw.get_str("memory.l2.policy", "lru"), hp > 0);
   double f = sim.miss_fraction()[0];
   // K and V are billed as separate gload calls but share one combined hugepage fetch above, so
   // each gets its proportional share of that one page (they sum back to exactly one hugepage per
@@ -732,6 +783,7 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
   meta["regs_per_thread"] = rpt; meta["reg_spill_bytes"] = spill;
   meta["smem_per_block"] = static_cast<int64_t>(smem);
   meta["l2_hit_rate"] = sim.hit_rate; meta["l2_partitions"] = n_part;
+  meta["sim_coverage"] = win.coverage; meta["dma_hugepage_bytes"] = hp;
   meta["flops"] = 2.0 * B * H * S * (d_qk + d_v); meta["kv_bytes"] = kv_bytes; meta["l2_miss_KV"] = f;
   meta["splits"] = splits;
 
@@ -778,35 +830,45 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   for (int64_t b = 0; b < B; ++b)
     for (int64_t h = 0; h < H; ++h)
       for (int64_t q = 0; q < qt; ++q) order.push_back({b, h, q});
-  int64_t cap = static_cast<int64_t>(hw.sms()) * resident;
-  if (static_cast<int64_t>(order.size()) > cap) order.resize(cap);
+  int64_t conc = static_cast<int64_t>(hw.sms()) * resident;
+  int64_t max_iters = 1;
+  for (auto it : iters_list) max_iters = std::max(max_iters, it);
+  SimWindow win = sim_window(hw, static_cast<int64_t>(order.size()), conc, max_iters, 2);
+  int64_t n_take = std::min<int64_t>(static_cast<int64_t>(order.size()), conc * win.waves);
   int64_t qpk = std::max<int64_t>(1, H / std::max<int64_t>(1, kv_heads));
-  std::vector<int64_t> keys, addrs;
-  std::vector<double> sizes;
-  std::vector<int> streams;
-  int itn = static_cast<int>(std::min<int64_t>(iters, 4));
-  for (int it = 0; it < itn; ++it)
-    for (auto [b, h, q] : order) {
-      if (it < iters_list[q]) {
-        keys.push_back((((b * 256 + h / qpk) * 65536 + it) * 2));
-        streams.push_back(0);
-        keys.push_back((((b * 256 + h / qpk) * 65536 + it) * 2 + 1));
-        streams.push_back(0);
-      }
-    }
-  double tb = (k_tile + v_tile) / 2.0;
+  int64_t kv_tiles = (S + bn - 1) / bn;
   cache::AddrCfg lmap = l2_addr_cfg(hw);
   double hp = hugepage_bytes(hw, lmap);
   double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
-  for (size_t i = 0; i < keys.size(); ++i) {
-    int64_t addr = static_cast<int64_t>(i * tb);
-    addrs.push_back(addr);
-    if (hp > 0) { keys[i] = addr / static_cast<int64_t>(hp); sizes.push_back(hp); }
-    else sizes.push_back(tb);
+  std::vector<int64_t> keys, addrs;
+  std::vector<double> sizes;
+  std::vector<int> streams;
+  // The KV cache as laid out: [B][kv_heads][kv_tiles], each tile's K then V. Every query tile of a
+  // head (and every head of a GQA group) walks the same KV tiles, so they share addresses/keys;
+  // replayed wave by wave, all blocks stepping through their KV tiles in lockstep.
+  for (int64_t w = 0; w < win.waves; ++w) {
+    int64_t lo_i = w * conc, hi_i = std::min<int64_t>(n_take, (w + 1) * conc);
+    for (int64_t it = 0; it < win.ksteps; ++it)
+      for (int64_t idx = lo_i; idx < hi_i; ++idx) {
+        auto [b, h, q] = order[idx];
+        if (it >= iters_list[q]) continue;
+        int64_t first = window > 0 ? std::max<int64_t>(0, q * bm - window + 1) / bn : 0;
+        int64_t tile_id = (b * kv_heads + h / qpk) * kv_tiles + std::min<int64_t>(first + it, kv_tiles - 1);
+        int64_t k_addr = static_cast<int64_t>(tile_id * (k_tile + v_tile));
+        int64_t v_addr = k_addr + static_cast<int64_t>(k_tile);
+        keys.push_back(hp > 0 ? k_addr / static_cast<int64_t>(hp) : tile_id * 2);
+        addrs.push_back(k_addr);
+        sizes.push_back(hp > 0 ? hp : k_tile);
+        streams.push_back(0);
+        keys.push_back(hp > 0 ? v_addr / static_cast<int64_t>(hp) : tile_id * 2 + 1);
+        addrs.push_back(v_addr);
+        sizes.push_back(hp > 0 ? hp : v_tile);
+        streams.push_back(0);
+      }
   }
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
-                                                    n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
+                                                    n_part, lmap, hw.get_str("memory.l2.policy", "lru"), hp > 0);
   double f = sim.miss_fraction()[0];
   // K and V are billed as separate gload calls but share one combined stream above; give each its
   // proportional share of one hugepage fetch (same reasoning as lower_attention_decode).
@@ -913,6 +975,7 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   meta["regs_per_thread"] = rpt; meta["reg_spill_bytes"] = spill;
   meta["smem_per_block"] = static_cast<int64_t>(smem);
   meta["l2_hit_rate"] = sim.hit_rate; meta["l2_partitions"] = n_part;
+  meta["sim_coverage"] = win.coverage; meta["dma_hugepage_bytes"] = hp;
   meta["flops"] = 2.0 * B * H * pairs * (d_qk + d_v); meta["l2_miss_KV"] = f;
   std::ostringstream tile_s2;
   tile_s2 << bm << "x" << bn << "/s" << tile.stages << "/sp" << tile.num_splits << "/c" << tile.consumers;

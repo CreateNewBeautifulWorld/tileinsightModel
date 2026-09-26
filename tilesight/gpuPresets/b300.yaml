@@ -93,7 +93,7 @@ memory:
                          # its own replacement. A tile goes to the partition its ADDRESS maps to.
     policy: lru          # lru | fifo | mru — hardware-managed replacement, simulated exactly
     model: lru           # lru (deterministic simulation) | sdcm (the paper's probabilistic model)
-    waves_simulated: 2   # replay this many waves so cross-wave reuse is visible
+    waves_simulated: 0   # 0 = replay every wave (capped by sim_max_accesses) so cross-wave reuse is visible
     blocks: 4            # [calib] physically independent L2 blocks, each with its own port(s)
     ports_per_block: 1   # [calib] load/store ports per block
     bytes_per_clk_per_port: 3072   # [calib] width of one port; blocks x ports x width x clock
