@@ -78,7 +78,7 @@ cache::AddrCfg l2_addr_cfg(const HwView& hw) {
 TraceAction gload(const HwView& hw, const std::string& name, double nbytes, double miss,
                   const std::string& load_path, const std::vector<int>& deps,
                   bool has_sram_miss, double sram_miss, bool has_l1_miss, double l1_miss,
-                  double slice_frac = 1.0) {
+                  double slice_frac = 1.0, double hugepage = 0.0) {
   double l1_m = 1.0;
   std::map<std::string, double> work;
   if (has_l1_miss && hw.l1_capacity_bytes() > 0) {
@@ -97,7 +97,12 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
   }
   double to_memory = after_l1 * (1.0 - from_buffer);
   work["l2"] = to_memory;
-  work["ddr"] = to_memory * miss;
+  // With a DMA hugepage configured (and `miss` coming from a hugepage-keyed L2 simulation, see
+  // l2_addr_cfg's caller), a miss means a whole hugepage was fetched, not just this tile's bytes
+  // — that is the point of the hugepage/huge-page-DMA model, and it is `miss` itself, not this
+  // multiplication, that already amortizes the rare full-page fetch over the many hits between
+  // them. Without a hugepage configured, this is the plain "miss fraction of this tile" case.
+  work["ddr"] = hugepage > 0 ? miss * hugepage : to_memory * miss;
 
   double lat = 0.0;
   for (const auto& [path, frac] : parse_path_split(load_path)) {
@@ -117,10 +122,14 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
       work["smem"] = (work.count("smem") ? work["smem"] : 0.0) + hw.smem_time_per_sm(nbytes * frac);
   }
   work["l2"] = std::max(0.0, work["l2"]);
-  // Only the DDR leg is DMA-mediated (a genuine HBM fetch, hugepage/slice quantized); the L2 leg
-  // is the L2 port's own bandwidth, serving every access whether it hits or misses, and is never
-  // hugepage-quantized.
-  if (slice_frac < 1.0) work["ddr"] /= slice_frac;
+  // The L2 leg is the L2 port's own bandwidth (every access, hit or miss) and always pays the
+  // occupancy-derived slice-spread proxy. The DDR leg is a genuine HBM fetch: with a hugepage
+  // configured, `miss * hugepage` above already accounts for full slice spread by construction,
+  // so it does not also pay the (redundant) occupancy proxy; without one, it does.
+  if (slice_frac < 1.0) {
+    work["l2"] /= slice_frac;
+    if (hugepage <= 0) work["ddr"] /= slice_frac;
+  }
 
   double buf_lat = has_sram ? hw.sram_latency_ns() * 1e-9 : 0.0;
   bool has_l2 = hw.l2_capacity_bytes() > 0;
@@ -143,7 +152,10 @@ TraceAction gstore(const std::string& name, double nbytes, const std::vector<int
   a.name = name;
   a.work["l2"] = nbytes;
   a.work["ddr"] = nbytes * ddr_frac;
-  if (slice_frac < 1.0) a.work["ddr"] /= slice_frac;
+  if (slice_frac < 1.0) {
+    a.work["l2"] /= slice_frac;
+    a.work["ddr"] /= slice_frac;
+  }
   if (sram_frac != 0.0) a.work["sram"] = nbytes * sram_frac;
   a.deps = deps;
   return a;
@@ -169,35 +181,34 @@ double resident_frac(const HwView& hw, double footprint_bytes, const std::string
 }
 
 // L2 and DDR are not one GPU-wide pool: each memory slice owns its own L2 port and HBM channel.
-// `memory.dma.hugepage_KB`, when configured, models the fixed byte granularity of one DMA
-// operation: a DMA moves exactly one mega tile, never less. A mega tile is, by construction (and
-// asserted below, not simulated), an exact whole multiple of `n_slices` interleave granules, so
-// every mega tile a DMA moves is spread perfectly evenly over every slice — there is no
-// partial-slice case and no address arithmetic to alias, unlike two earlier attempts at this same
-// problem that derived slice spread from the L2 hit/miss simulation's synthetic per-tile address
-// stream (tuned for cache behavior, and it aliases badly on power-of-two tile strides vs. the
-// interleave granularity). The only cost this charges is rounding a transfer up to whole mega
-// tiles when it needs less than one — pure fetch waste, not an imbalance penalty.
-// Unconfigured (hugepage_KB <= 0, the default), falls back to the coarser occupancy proxy: how
-// many blocks are concurrently resident vs. how many slices there are — no behavior change for
-// any preset that hasn't opted in.
-double slice_bw_frac(const HwView& hw, int n_slices, int64_t granularity, int64_t concurrent_blocks,
-                     double nbytes) {
+// Without a DMA hugepage configured, this is the only signal available for how spread a kernel's
+// traffic is: how many blocks are concurrently resident vs. how many slices there are. With one
+// configured, hugepage_bytes()/the hugepage-keyed L2 simulation supersede this entirely (a
+// hugepage spans every slice evenly by construction — see hugepage_bytes below), so this proxy is
+// used only for kernels/lanes that never call simulate_l2's hugepage path (matrix operand loads
+// do; Q/output/spill do not).
+double slice_bw_frac(int n_slices, int64_t concurrent_blocks) {
   n_slices = std::max(1, n_slices);
-  if (nbytes <= 0) return 1.0;
-  double mega = hw.get_num("memory.dma.hugepage_KB", 0.0) * 1024.0;
-  if (mega <= 0) {
-    if (n_slices <= 1 || concurrent_blocks <= 0) return 1.0;
-    return std::min(1.0, static_cast<double>(concurrent_blocks) / static_cast<double>(n_slices));
-  }
-  double unit = static_cast<double>(std::max<int64_t>(1, granularity)) * n_slices;
-  double units = mega / unit;
+  if (n_slices <= 1 || concurrent_blocks <= 0) return 1.0;
+  return std::min(1.0, static_cast<double>(concurrent_blocks) / static_cast<double>(n_slices));
+}
+
+// A DMA moves exactly one hugepage per operation, never less. A hugepage is, by construction (and
+// asserted here, not simulated), an exact whole multiple of `cfg`'s granularity x port count, so
+// every hugepage a DMA moves spans every memory slice evenly — no partial-slice case, no address
+// arithmetic to alias, unlike two earlier attempts at this same problem that derived slice spread
+// from the L2 hit/miss simulation's synthetic per-tile address stream (aliases badly on
+// power-of-two tile strides vs. the interleave granularity). Returns 0 (disabled) when unset.
+double hugepage_bytes(const HwView& hw, const cache::AddrCfg& cfg) {
+  double hp = hw.get_num("memory.dma.hugepage_KB", 0.0) * 1024.0;
+  if (hp <= 0) return 0.0;
+  double unit = static_cast<double>(std::max<int64_t>(1, cfg.granularity)) * std::max(1, cfg.ports);
+  double units = hp / unit;
   if (units < 1.0 - 1e-9 || std::abs(units - std::llround(units)) > 1e-6)
     throw std::invalid_argument(
         "memory.dma.hugepage_KB must be a whole multiple of (L2 interleave granularity x "
-        "memory slice count) so a mega tile splits evenly across every slice");
-  double n_mega = std::ceil(nbytes / mega);
-  return nbytes / (n_mega * mega);
+        "memory slice count) so a hugepage splits evenly across every slice");
+  return hp;
 }
 
 }  // namespace
@@ -276,6 +287,9 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   }
 
   // ---- L2 model: deterministic tile-level simulation over several waves --------------
+  cache::AddrCfg lmap = l2_addr_cfg(hw);
+  double hp = hugepage_bytes(hw, lmap);
+  double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
   int64_t conc = static_cast<int64_t>(hw.sms()) * resident;
   auto order_all = grouped_raster(mt, nt, t.swizzle);
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> full_order;  // (b,s,m,n)
@@ -297,21 +311,23 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
       for (int64_t idx = lo; idx < hi; ++idx) {
         auto [b_, s_, m, n] = order[idx];
         int64_t k = s_ * iters + kk;
-        keys.push_back(((b_ * 4096 + m) * 65536 + k) * 2);
-        addrs.push_back(static_cast<int64_t>(a_base + ((b_ * mt + m) * kt + k) * a_tile));
-        sizes.push_back(a_tile);
+        int64_t a_addr = static_cast<int64_t>(a_base + ((b_ * mt + m) * kt + k) * a_tile);
+        int64_t b_addr = static_cast<int64_t>(b_base + ((b_ * kt + k) * nt + n) * b_tile);
+        // With a hugepage configured, key the cache by hugepage index (not by loop index) so a
+        // second access landing in an already-resident hugepage is a real hit in the simulation
+        // — that is what lets miss_fraction() mean "how often a whole new hugepage is needed",
+        // which gload then bills directly (miss * hugepage), instead of a raw per-tile miss rate.
+        keys.push_back(hp > 0 ? a_addr / static_cast<int64_t>(hp) : ((b_ * 4096 + m) * 65536 + k) * 2);
+        addrs.push_back(a_addr);
+        sizes.push_back(hp > 0 ? hp : a_tile);
         streams.push_back(0);
-        keys.push_back(((b_ * 4096 + n) * 65536 + k) * 2 + 1);
-        addrs.push_back(static_cast<int64_t>(b_base + ((b_ * kt + k) * nt + n) * b_tile));
-        sizes.push_back(b_tile);
+        keys.push_back(hp > 0 ? b_addr / static_cast<int64_t>(hp) : ((b_ * 4096 + n) * 65536 + k) * 2 + 1);
+        addrs.push_back(b_addr);
+        sizes.push_back(hp > 0 ? hp : b_tile);
         streams.push_back(1);
       }
     }
   }
-  cache::AddrCfg lmap = l2_addr_cfg(hw);
-  auto slice_frac = [&](double nbytes) {
-    return slice_bw_frac(hw, lmap.ports, lmap.granularity, concurrent_blocks, nbytes);
-  };
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   std::string policy = hw.get_str("memory.l2.policy", "lru");
   bool through_l1 = false;
@@ -373,8 +389,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   auto [mma_lane, mma_t] = hw.mma_cost(2.0 * bm_c * t.bn * t.bk, comp_dt);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a, slice_frac(a_tile)));
-  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b, slice_frac(b_tile / cl)));
+  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a, occ_frac, hp));
+  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b, occ_frac, hp));
   {
     TraceAction mma;
     mma.name = "mma";
@@ -387,7 +403,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   if (spill) {
     TraceAction sp;
     sp.name = "spill:regs";
-    sp.work["l2"] = 2.0 * spill / std::max<int64_t>(1, iters) / slice_frac(a_tile);
+    sp.work["l2"] = 2.0 * spill / std::max<int64_t>(1, iters) / occ_frac;
     sp.deps = {2};
     body.push_back(sp);
   }
@@ -400,7 +416,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     acc_a.work["cuda"] = hw.cuda_time_per_sm(2.0 * t.bm * t.bn);
     acc_a.latency = hw.unit_latency_s(hw.has_tmem() ? "tmem" : "cuda");
     epilogue.push_back(acc_a);
-    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0, slice_frac(out_bytes)));
+    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0, occ_frac));
   }
 
   double useful = 2.0 * M * N * K * batch;
@@ -467,10 +483,10 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * elementwise_resident);
   double active_bytes = std::max(bytes_in, bytes_out) * per * static_cast<double>(concurrent_blocks);
   double res = oc ? resident_frac(hw, active_bytes, "act") : 0.0;
-  cache::AddrCfg ew_lmap = l2_addr_cfg(hw);
+  double ew_occ_frac = slice_bw_frac(l2_addr_cfg(hw).ports, concurrent_blocks);
   std::vector<TraceAction> body;
   body.push_back(gload(hw, "load:" + in_name, bytes_in * per, 1.0, "lsu", {}, true, 1.0 - res, false, 0.0,
-                       slice_bw_frac(hw, ew_lmap.ports, ew_lmap.granularity, concurrent_blocks, bytes_in * per)));
+                       ew_occ_frac));
   TraceAction comp;
   comp.name = "compute";
   comp.work["cuda"] = hw.cuda_time_per_sm(flops * per);
@@ -479,7 +495,7 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   comp.latency = hw.unit_latency_s(sfu_ops > 0 ? "sfu" : "cuda");
   body.push_back(comp);
   body.push_back(gstore("store:" + out_name, bytes_out * per, {1}, 1.0 - res, hw.has_sram() ? res : 0.0,
-                        slice_bw_frac(hw, ew_lmap.ports, ew_lmap.granularity, concurrent_blocks, bytes_out * per)));
+                        ew_occ_frac));
 
   TraceKernel k;
   k.name = name;
@@ -558,12 +574,26 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
       keys.push_back((((b * 256 + h) * 4096 + s) * 4096 + it));
       streams.push_back(0);
     }
-  for (size_t i = 0; i < keys.size(); ++i) { addrs.push_back(static_cast<int64_t>(i * tile_b)); sizes.push_back(tile_b); }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
+  double hp = hugepage_bytes(hw, lmap);
+  double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
+  for (size_t i = 0; i < keys.size(); ++i) {
+    int64_t addr = static_cast<int64_t>(i * tile_b);
+    addrs.push_back(addr);
+    // K and V share one combined access unit here (one cache atom per (b,h,s,it)); keying by
+    // hugepage index (not loop index) makes a second access into an already-resident hugepage a
+    // real hit, same reasoning as lower_gemm.
+    if (hp > 0) { keys[i] = addr / static_cast<int64_t>(hp); sizes.push_back(hp); }
+    else sizes.push_back(tile_b);
+  }
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
                                                     n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
   double f = sim.miss_fraction()[0];
+  // K and V are billed as separate gload calls but share one combined hugepage fetch above, so
+  // each gets its proportional share of that one page (they sum back to exactly one hugepage per
+  // real miss) -- the same proportionality to_memory*miss already gives the non-hugepage path.
+  double k_share = tile_b > 0 ? k_tile / tile_b : 0.0, v_share = tile_b > 0 ? v_tile / tile_b : 0.0;
   bool has_fs = false;
   double fs = 0.0;
   if (hw.has_sram()) {
@@ -583,11 +613,11 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
 
   std::vector<TraceAction> body;
   body.push_back(gload(hw, v_in_k ? "load:kv_cache(latent)" : "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs,
-                       false, 0.0, slice_bw_frac(hw, lmap.ports, lmap.granularity, concurrent_blocks, k_tile)));
+                       false, 0.0, occ_frac, hp * k_share));
   int iv = 0;
   if (!v_in_k) {
     body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0,
-                         slice_bw_frac(hw, lmap.ports, lmap.granularity, concurrent_blocks, v_tile)));
+                         occ_frac, hp * v_share));
     iv = 1;
   }
   {
@@ -716,12 +746,23 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
       }
     }
   double tb = (k_tile + v_tile) / 2.0;
-  for (size_t i = 0; i < keys.size(); ++i) { addrs.push_back(static_cast<int64_t>(i * tb)); sizes.push_back(tb); }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
+  double hp = hugepage_bytes(hw, lmap);
+  double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
+  for (size_t i = 0; i < keys.size(); ++i) {
+    int64_t addr = static_cast<int64_t>(i * tb);
+    addrs.push_back(addr);
+    if (hp > 0) { keys[i] = addr / static_cast<int64_t>(hp); sizes.push_back(hp); }
+    else sizes.push_back(tb);
+  }
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
                                                     n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
   double f = sim.miss_fraction()[0];
+  // K and V are billed as separate gload calls but share one combined stream above; give each its
+  // proportional share of one hugepage fetch (same reasoning as lower_attention_decode).
+  double kv_total = k_tile + v_tile;
+  double k_share = kv_total > 0 ? k_tile / kv_total : 0.0, v_share = kv_total > 0 ? v_tile / kv_total : 0.0;
   bool has_fs = false;
   double fs = 0.0;
   if (hw.has_sram()) {
@@ -739,9 +780,9 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
 
   std::vector<TraceAction> body;
   body.push_back(gload(hw, "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0,
-                       slice_bw_frac(hw, lmap.ports, lmap.granularity, concurrent_blocks, k_tile)));
+                       occ_frac, hp * k_share));
   body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0,
-                       slice_bw_frac(hw, lmap.ports, lmap.granularity, concurrent_blocks, v_tile)));
+                       occ_frac, hp * v_share));
   {
     TraceAction qk;
     qk.name = "gemm_qk";

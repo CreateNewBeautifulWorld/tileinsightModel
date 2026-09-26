@@ -237,48 +237,45 @@ def test_l2_ddr_bandwidth_is_capped_by_memory_slices():
     assert k_wide.trace.body[0].work["ddr"] == pytest.approx(ddr16)
 
 
-def test_mega_dma_tile_routes_by_construction_not_by_simulated_address():
-    """memory.dma.hugepage_KB models a DMA that moves exactly one mega tile per operation, never
-    less. A mega tile must be a whole multiple of (L2 interleave granularity x port count) — by
-    construction, not simulation — so every mega tile a DMA moves spans every slice evenly: there
-    is no partial-slice case and no address arithmetic to alias, unlike two earlier attempts at
-    this same problem that derived slice spread from the L2 hit/miss simulation's synthetic
-    per-tile address stream (aliases badly on power-of-two tile strides). The only cost is
-    rounding a transfer up to whole mega tiles when it needs less than one. Unset (default),
-    lower_gemm falls back to the occupancy proxy from test_l2_ddr_bandwidth_is_capped_by_memory_slices."""
-    # bm=256, bk=64, fp8 -> a_tile = 256*64*1 = 16384 bytes, exactly matching one 16KB unit below.
-    t = TileConfig(bm=256, bn=128, bk=64)
-    ports16 = {"ports": 16, "mode": "interleave", "granularity_KB": 1}  # unit = 1KB * 16 = 16KB
+def test_dma_hugepage_keys_the_l2_simulation_instead_of_rounding_after_the_fact():
+    """memory.dma.hugepage_KB models a DMA that moves exactly one hugepage per operation, never
+    less, and must be a whole multiple of (L2 interleave granularity x port count) -- asserted, not
+    simulated -- so a hugepage always spans every slice evenly by construction: no partial-slice
+    case, no address arithmetic to alias.
 
-    def ddr_of(addr_cfg, mega_tile_KB=None):
-        overrides = {"memory.addressing.l2": addr_cfg}
-        if mega_tile_KB is not None:
-            overrides["memory.dma.hugepage_KB"] = mega_tile_KB
-        hw = HW.override(overrides)
-        k = _lower_gemm(hw, 512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
-        return hw, k, k.trace.body[0].work["ddr"]
+    Configuring it also changes the L2 simulation's cache atom from "one raw tile" to "one
+    hugepage": lower_gemm keys the A/B access stream by hugepage index instead of loop index, so a
+    second access landing in an already-resident hugepage is a real hit in the simulation, and
+    miss_fraction() means "how often a genuinely new hugepage is needed" -- which gload then bills
+    directly as miss * hugepage_bytes. An earlier approach instead rounded each call's already-
+    amortized raw-tile-miss bytes up to a whole hugepage independently every call, which the
+    round-time formula's steady-state x iters multiplication then blew up ~200x on a genuinely
+    compute-bound GEMM (0.315ms tc-bound -> 63.7ms, falsely ddr-bound) -- exactly what this test
+    guards against staying broken."""
+    valid_addr = {"ports": 16, "mode": "interleave", "granularity_KB": 1}  # unit = 16KB
 
-    # A single slice can't be short of bandwidth to itself: this is the true, undiluted byte count
-    # (no occupancy derating, no mega-tile rounding) every comparison below is measured against.
-    _, _, ddr_raw = ddr_of({"ports": 1, "mode": "interleave", "granularity_KB": 1})
-
-    # An invalid mega tile (not a whole multiple of granularity x ports) is rejected outright.
+    # An invalid hugepage (not a whole multiple of granularity x ports) is rejected outright.
     with pytest.raises(ValueError):
-        ddr_of(ports16, 24)  # 24KB is not a multiple of the 16KB unit
+        _lower_gemm(HW.override({"memory.addressing.l2": valid_addr, "memory.dma.hugepage_KB": 24}),
+                   512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+                   tile=TileConfig(bm=256, bn=128, bk=64))
 
-    # mega == the unit == a_tile exactly: one mega tile, zero rounding waste, full slice spread.
-    _, _, ddr_exact = ddr_of(ports16, 16)
-    assert ddr_exact == pytest.approx(ddr_raw)
+    big_tile = TileConfig(bm=128, bn=256, bk=64, cluster_m=2, cta_pair=True)
+    hw = HW.override({"memory.addressing.l2": valid_addr, "memory.dma.hugepage_KB": 2048})
+    k = _lower_gemm(hw, 8192, 8192, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=big_tile)[0]
 
-    # mega == 2x the unit, still >= a_tile: still one mega tile, but half of it is wasted.
-    hw_2x, k_2x, ddr_2x = ddr_of(ports16, 32)
-    assert ddr_2x == pytest.approx(ddr_raw * 2)
-    hw_exact, k_exact, _ = ddr_of(ports16, 16)
-    assert evaluate(k_2x, hw_2x).time_s > evaluate(k_exact, hw_exact).time_s
+    # DDR work is exactly miss * hugepage_bytes now, not a per-call rounding of raw tile bytes.
+    hugepage_bytes = 2048 * 1024
+    assert k.trace.body[0].work["ddr"] == pytest.approx(k.meta["l2_miss_A"] * hugepage_bytes)
+    assert k.trace.body[1].work["ddr"] == pytest.approx(k.meta["l2_miss_B"] * hugepage_bytes)
 
-    # mega == 4x the unit, still one DMA per load, four times the waste.
-    _, _, ddr_4x = ddr_of(ports16, 64)
-    assert ddr_4x == pytest.approx(ddr_raw * 4)
+    # A genuinely compute-bound GEMM stays close to tc-bound: hugepage-aware reuse keeps the
+    # amortized DDR cost small, unlike the earlier per-call rounding that made every kernel falsely
+    # DDR-bound regardless of how reusable its access pattern actually was.
+    ideal = evaluate(_lower_gemm(HW, 8192, 8192, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+                                 tile=big_tile)[0], HW)
+    assert ideal.bottleneck == "tc"
+    assert evaluate(k, hw).time_s < 3 * ideal.time_s
 
 
 def test_dma_destination_changes_which_lanes_are_used():

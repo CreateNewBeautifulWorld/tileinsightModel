@@ -185,36 +185,50 @@ far more concurrent blocks than slices and sees no penalty; a decode step with t
 flight to reach every slice does. See `tests/test_paths_addr_buffer.py::
 test_l2_ddr_bandwidth_is_capped_by_memory_slices`.
 
-**`memory.dma.hugepage_KB`** replaces that occupancy proxy with a size-based one when a preset
-sets it (default 0 = unset, no behavior change). A DMA moves exactly one **mega tile** per
-operation, never less. A mega tile is, **by construction** (asserted, not simulated — see
-below), a whole multiple of `memory.addressing.l2`'s granularity × port count, so every mega tile
-a DMA moves spans every slice evenly: there is no partial-slice case at all, and no address
-arithmetic to alias (unlike the L2 hit/miss simulation's synthetic per-tile address stream, which
-aliases on power-of-two tile strides — the reason two earlier attempts at slice-aware bandwidth
-failed). `slice_bw_frac` in `gpu_top.cpp` asserts `mega_tile_bytes % (granularity × n_slices) ==
-0` (`std::invalid_argument` otherwise — a config error, not an illegal-tile `nullopt`), then bills
-`n_mega = ceil(transfer_bytes / mega_tile_bytes)` whole mega tiles at
-`n_mega × mega_tile_bytes / transfer_bytes` — i.e. no cost at all once `mega_tile_bytes` divides
-`transfer_bytes` evenly, and pure rounding waste (never an imbalance penalty — full slice spread
-is guaranteed by construction) whenever it doesn't. This is a genuine trade-off knob, not a
-strictly-better replacement for the occupancy proxy: a `hugepage_KB` much larger than a kernel's
-real per-transfer tile size is mostly waste, so it needs a real DMA/TMA burst-size calibration per
-part, tagged `calib` like the rest of §4's cache numbers — it is not derived from anything else in
-the config. See
-`tests/test_paths_addr_buffer.py::test_mega_dma_tile_routes_by_construction_not_by_simulated_address`.
+**`memory.dma.hugepage_KB`** models a DMA that moves exactly one **hugepage** per operation, never
+less (matching how NVIDIA's DMA/TMA engines actually burst — the name is deliberate: 2MB, the huge
+page size, is the expected real value). Unset (default 0), `gload`/`gstore` fall back to the
+occupancy proxy above unchanged — no behavior change for any preset that hasn't opted in. A
+hugepage is, **by construction** (asserted by `hugepage_bytes()` in `gpu_top.cpp`, never
+simulated), a whole multiple of `memory.addressing.l2`'s granularity × port count
+(`std::invalid_argument` otherwise — a config error, not an illegal-tile `nullopt`), so every
+hugepage a DMA moves spans every memory slice evenly: no partial-slice case, no address arithmetic
+to alias — unlike two earlier, failed attempts at slice-aware bandwidth that derived slice spread
+from the L2 hit/miss simulation's synthetic per-tile address stream (aliases on power-of-two tile
+strides).
 
-**Deliberately out of scope for this pass** (flagged, not attempted, given how the two failed
-address-based attempts above already show the cost of guessing wrong in this exact area): folding
-mega-tile granularity into the L2 hit/miss simulation itself (residency would become an all-or-
-nothing per-(mega-tile, slice) shard instead of a continuous fraction, and a genuine cache hit
-would let a small transfer skip paying the mega-tile fetch cost entirely — right now every DMA-path
-`gload`/`gstore` call pays it independently of `simulate_l2`'s hit/miss result); the same whole-
-mega-tile granularity for on-chip buffer residency (`resident_frac`); and Z-order/blocked tile
-addressing (so a 2-D tile's bytes are contiguous for mega-tile alignment purposes, unlike a plain
-row-major layout). Each touches shared, tested machinery (`simulate_l2`'s atom sizing and its
-`l2_partition_*` meta fields, `on_chip_buffer::resident_frac`, `common/cache/address_map`) and
-deserves its own change, not folding into this one.
+Configuring it also changes what the L2 simulation's cache atom *is*, for the tensor operand loads
+that already go through `simulate_l2` (GEMM A/B, attention K/V — "the matrix part"; Q, output
+stores, register spill are untouched, they never went through `simulate_l2` to begin with — "the
+rest goes through L2 ports" at their own raw byte size, never hugepage-priced). Each of those
+loads' access stream is keyed by **hugepage index** (`address / hugepage_bytes`) instead of loop
+index, so a second access landing inside an already-resident hugepage is a real hit in the
+simulation — `miss_fraction()` then means "how often a genuinely new hugepage is needed", and
+`gload` bills that directly as `miss × hugepage_bytes` (replacing the plain `to_memory × miss` it
+uses when hugepages are off). A's and B's (K's and V's) miss fractions are independent per-stream
+results from one shared simulation call, so no proportional splitting is needed for GEMM; decode
+and prefill attention model K+V as one *combined* access unit with one shared miss fraction (a
+pre-existing simplification, unrelated to hugepages), so each operand's `gload` call is billed its
+`k_tile/(k_tile+v_tile)` or `v_tile/(k_tile+v_tile)` share of the one combined hugepage fetch, so
+the two calls still sum to exactly one hugepage per real miss rather than double-charging it.
+
+Getting this right took a real wrong turn worth recording: an earlier version left `simulate_l2`
+alone and instead rounded each call's *already piece-wise-amortized* raw-tile miss bytes up to a
+whole hugepage independently, every call — since `gload` represents one steady-state loop
+iteration that the round-time formula then multiplies by `iters`, that turned "occasionally fetch
+a whole page, which then serves ~20 iterations for free" into "possibly re-fetch a whole page on
+every one of 128 iterations", inflating a genuinely `tc`-bound 8192³ FP8 GEMM (0.315ms) to a
+falsely `ddr`-bound 63.7ms — about 200x. Keying the cache itself by hugepage index fixes this at
+the source, because reuse across iterations is now a real, simulated hit rather than something the
+billing formula has to guess at after the fact. See
+`tests/test_paths_addr_buffer.py::test_dma_hugepage_keys_the_l2_simulation_instead_of_rounding_after_the_fact`.
+
+**Still deliberately out of scope**: the same whole-hugepage granularity for on-chip buffer
+residency (`resident_frac`, `on_chip_buffer::resident_frac`) — a buffer that must hold a complete
+hugepage rather than a continuous capacity fraction; and Z-order/blocked tile addressing (so a 2-D
+tile's bytes are contiguous for hugepage-alignment purposes, unlike a plain row-major layout,
+`common/cache/address_map`). Both are natural follow-ons but touch more shared, tested machinery
+and deserve their own change.
 
 ## 5. Kernel lowerings
 ### 5.1 GEMM (`model/gpu_top/gpu_top.cpp`, `lower_gemm`)

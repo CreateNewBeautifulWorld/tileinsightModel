@@ -271,11 +271,12 @@ FIELDS: tuple[Field, ...] = (
     F("memory.dma.destination", "str", "", "smem", "policy", "memory.dma",
       "Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass"),
     F("memory.dma.hugepage_KB", "float", "KB", 0, "calib", "memory.dma",
-      "Fixed size of one DMA operation: a DMA moves exactly one mega tile, never less (0 = unset: "
-      "fall back to an occupancy proxy for L2/DDR slice spread). Must be a whole multiple of "
-      "memory.addressing.l2's granularity x port count, so a mega tile always splits evenly across "
-      "every memory slice by construction; a transfer smaller than one mega tile still pays for "
-      "the whole thing (rounding waste), which is the trade-off against setting it too large"),
+      "Fixed size of one DMA operation: a DMA moves exactly one hugepage, never less (0 = unset: "
+      "fall back to an occupancy proxy for L2/DDR slice spread; NVIDIA DMA/TMA moves 2048). Must be "
+      "a whole multiple of memory.addressing.l2's granularity x port count, so a hugepage always "
+      "splits evenly across every memory slice by construction. Also changes the L2 simulation's "
+      "cache atom (for GEMM A/B and attention K/V) to hugepage granularity, so real reuse across "
+      "loop iterations shows up as a hit instead of a fresh miss every call"),
 
     # ---------------------------------------------------------------- load paths
     F("load_paths", "map", "", REQUIRED, "spec", "load_paths",
