@@ -102,7 +102,8 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
   // — that is the point of the hugepage/huge-page-DMA model, and it is `miss` itself, not this
   // multiplication, that already amortizes the rare full-page fetch over the many hits between
   // them. Without a hugepage configured, this is the plain "miss fraction of this tile" case.
-  work["ddr"] = hugepage > 0 ? miss * hugepage : to_memory * miss;
+  // Either way, whatever fraction the on-chip buffer already answered never reaches HBM at all.
+  work["ddr"] = hugepage > 0 ? miss * hugepage * (1.0 - from_buffer) : to_memory * miss;
 
   double lat = 0.0;
   for (const auto& [path, frac] : parse_path_split(load_path)) {
@@ -198,8 +199,12 @@ double slice_bw_frac(int n_slices, int64_t concurrent_blocks) {
 // every hugepage a DMA moves spans every memory slice evenly — no partial-slice case, no address
 // arithmetic to alias, unlike two earlier attempts at this same problem that derived slice spread
 // from the L2 hit/miss simulation's synthetic per-tile address stream (aliases badly on
-// power-of-two tile strides vs. the interleave granularity). Returns 0 (disabled) when unset.
+// power-of-two tile strides vs. the interleave granularity). Returns 0 (disabled) when unset, or
+// when there is no L2 to key by hugepage at all: with zero L2 capacity nothing can ever stay
+// resident, so every access would wrongly cost a fresh hugepage instead of falling back to the
+// plain per-tile miss cost a no-L2 config already models correctly.
 double hugepage_bytes(const HwView& hw, const cache::AddrCfg& cfg) {
+  if (hw.l2_capacity_bytes() <= 0) return 0.0;
   double hp = hw.get_num("memory.dma.hugepage_KB", 0.0) * 1024.0;
   if (hp <= 0) return 0.0;
   double unit = static_cast<double>(std::max<int64_t>(1, cfg.granularity)) * std::max(1, cfg.ports);
