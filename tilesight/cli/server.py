@@ -186,6 +186,33 @@ def _model_json(rep) -> dict:
             "bounds": _bounds_json(rep), "ops": _ops_json(rep)}
 
 
+def _workload_report_json(rep, wl: dict, cur_gpu_config, cfg: dict, prog) -> dict:
+    """Everything the results page shows for one phase's report — shared by the single-phase
+    "workload" mode and the prefill+decode "workload_both" mode (one call per phase)."""
+    out = _model_json(rep)
+    out["workload"] = wl
+    out["workload_memory"] = memory_breakdown(wl, cur_gpu_config)
+    out["by_block"] = {k: v / rep.step_time_s for k, v in rep.by_domain().items()}
+    out["activity_by_block"] = rep.activity_by_domain()
+    if cfg.get("compare_attention"):
+        prog(1, 1, "comparing flash vs naive attention")
+        out["attn_compare"] = compare_attention_impl(wl, cur_gpu_config)
+    if cfg.get("slice_cfg"):
+        out["derived"] = slice_derive(cfg["slice_cfg"])
+    out["arch_svg"] = arch_svg(cur_gpu_config)
+    out["gpu_name"] = cur_gpu_config.name
+    # attach the heaviest kernel's timeline so the Excel / CSV / PDF downloads AND the inline
+    # Gantt view on the results page work
+    prog(1, 1, "building the trace of the heaviest kernel")
+    ks = _top_kernels(rep, cur_gpu_config, n=1)
+    if ks:
+        tl = steady_timeline(ks[0], cur_gpu_config)
+        out["timeline"] = tl
+        out["trace_text"] = trace_text(tl, ks[0].name, cur_gpu_config.name)
+        out["trace_kernel"] = ks[0].name
+    return out
+
+
 # ------------------------------------------------------------------ single-GPU kernel mode
 def _kernel_candidates(cur_gpu_config: HardwareSpec, k: dict, progress=None):
     """Evaluate one kernel on ONE GPU over a tile search space; return ranked candidates."""
@@ -326,26 +353,19 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
             if problems:
                 raise ValueError("; ".join(problems))
             rep = run_workload(wl, cur_gpu_config, progress=prog)
-            out = _model_json(rep)
-            out["workload"] = wl
-            out["workload_memory"] = memory_breakdown(wl, cur_gpu_config)
-            out["by_block"] = {k: v / rep.step_time_s for k, v in rep.by_domain().items()}
-            out["activity_by_block"] = rep.activity_by_domain()
-            if cfg.get("compare_attention"):
-                prog(1, 1, "comparing flash vs naive attention")
-                out["attn_compare"] = compare_attention_impl(wl, cur_gpu_config)
-            if cfg.get("slice_cfg"):
-                out["derived"] = slice_derive(cfg["slice_cfg"])
-            out["arch_svg"] = arch_svg(cur_gpu_config)
-            out["gpu_name"] = cur_gpu_config.name
-            # attach the heaviest kernel's timeline so the Excel / CSV / PDF downloads work
-            prog(1, 1, "building the trace of the heaviest kernel")
-            ks = _top_kernels(rep, cur_gpu_config, n=1)
-            if ks:
-                tl = steady_timeline(ks[0], cur_gpu_config)
-                out["timeline"] = tl
-                out["trace_text"] = trace_text(tl, ks[0].name, cur_gpu_config.name)
-                out["trace_kernel"] = ks[0].name
+            out = _workload_report_json(rep, wl, cur_gpu_config, cfg, prog)
+        elif mode == "workload_both":
+            # prefill + decode together, one job, so the results page can show both without a
+            # second run — the "single token generation step" decode needs to sit right next to
+            # the prompt-processing prefill step to compare.
+            wl = cfg.get("workload") or {}
+            problems = validate_workload(wl)
+            if problems:
+                raise ValueError("; ".join(problems))
+            from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import run_workload_both_phases
+            reps = run_workload_both_phases(wl, cur_gpu_config, progress=prog)
+            out = {phase: _workload_report_json(rep, wl, cur_gpu_config, cfg, prog)
+                   for phase, rep in reps.items()}
         elif mode == "kernel":
             cands = _kernel_candidates(cur_gpu_config, cfg.get("kernel") or {}, progress=prog)
             if not cands:
@@ -423,6 +443,8 @@ class Handler(BaseHTTPRequestHandler):
             with _LOCK:
                 job = _JOBS.get(q.get("job", ""))
             res = (job or {}).get("result") or {}
+            if (job or {}).get("mode") == "workload_both":
+                res = res.get(q.get("phase", "decode"), {})
             tl = res.get("timeline")
             if tl is None:
                 return self._json(404, {"error": "no timeline for this job"})
@@ -442,7 +464,10 @@ class Handler(BaseHTTPRequestHandler):
             q = dict(p.split("=", 1) for p in self.path.split("?", 1)[-1].split("&") if "=" in p)
             with _LOCK:
                 job = _JOBS.get(q.get("job", ""))
-            tl = ((job or {}).get("result") or {}).get("timeline")
+            res = (job or {}).get("result") or {}
+            if (job or {}).get("mode") == "workload_both":
+                res = res.get(q.get("phase", "decode"), {})
+            tl = res.get("timeline")
             if tl is None:
                 return self._json(404, {"error": "no timeline for this job"})
             body = cycle_csv(tl, full=q.get("full") == "1").encode()
@@ -489,10 +514,17 @@ class Handler(BaseHTTPRequestHandler):
                 job = _JOBS.get(q.get("job", ""))
             res = (job or {}).get("result") or {}
             cfg = (job or {}).get("config") or {}
+            phase = q.get("phase", "decode")
+            if (job or {}).get("mode") == "workload_both":
+                res = res.get(phase, {})
             try:
                 cur_gpu_config = _load_hw(cfg)
                 wl = cfg.get("workload") or {}
-                rep = run_workload(wl, cur_gpu_config) if wl else None
+                if wl and (job or {}).get("mode") == "workload_both":
+                    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import run_workload_both_phases
+                    rep = run_workload_both_phases(wl, cur_gpu_config).get(phase)
+                else:
+                    rep = run_workload(wl, cur_gpu_config) if wl else None
                 kernels = []
                 if rep is not None:
                     for o in sorted(rep.ops, key=lambda o: -o.total_s)[:3]:
@@ -564,6 +596,7 @@ class Handler(BaseHTTPRequestHandler):
                         _JOBS.pop(k, None)
         with _LOCK:
             _JOBS[jid]["config"] = body.get("config", {})
+            _JOBS[jid]["mode"] = body.get("mode", "run")
         threading.Thread(target=_work, args=(jid, body.get("mode", "run"), body.get("config", {})),
                          daemon=True).start()
         self._json(200, {"job_id": jid})

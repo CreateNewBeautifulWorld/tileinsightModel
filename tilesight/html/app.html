@@ -303,8 +303,10 @@ async function run(){
   else { const y=$("gpuTilingPerfHWModelYaml").value.trim(); if(y) cfg.gpuTilingPerfHWModelYaml=y; }
   const t0=performance.now();
   try{
+    // prefill + decode together, one job — the results page below shows both as tabs, since
+    // comparing "processing the prompt" against "one token-generation step" is the point.
     const r=await fetch(API+"/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({mode:"workload",config:cfg})});
+      body:JSON.stringify({mode:"workload_both",config:cfg})});
     const {job_id}=await r.json(); JOB=job_id;
     let j;
     do{
@@ -322,19 +324,92 @@ async function run(){
 }
 function bars(list,total){ return list.map(x=>`<tr><td class="mono">${x.name}</td>
   <td class="num">${(100*x.share).toFixed(1)}%</td></tr>`).join(""); }
-function showResults(r,secs){
-  const m=r.memory;
-  $("results").innerHTML=`
+
+// --- the steady-state timeline (Gantt), same data/colors/grouping as the PDF report's, drawn
+// inline instead of only inside a downloaded PDF — see gpuTilingPerfHWModel/genResult/pdfreport.py
+// (_Gantt, LANE_RGB, unit_groups) for the source of truth this mirrors.
+const LANE_RGB={switch:"#6f8f6a",tc:"#b4552d",cuda:"#6b8f9c",sfu:"#8a6fb0",smem:"#5b9279",
+  tmem:"#c2903a",l1:"#2f7d54",l2:"#4f7cac",ddr:"#b3563a",sram:"#7f9a52",net:"#7a7a7a"};
+function unitGroups(lanes){
+  const g={"shader slice · cores":[],"shader slice · L1/scratchpad":[],"shader slice · load paths":[],
+           "on-chip buffer":[],"memory · L2 ports":[],"memory · HBM":[]};
+  for(const l of lanes){
+    if(["tc","cuda","sfu"].includes(l)) g["shader slice · cores"].push(l);
+    else if(["smem","tmem","l1"].includes(l)) g["shader slice · L1/scratchpad"].push(l);
+    else if(["sram","switch"].includes(l)) g["on-chip buffer"].push(l);
+    else if(l.startsWith("path")) g["shader slice · load paths"].push(l);
+    else if(l==="l2") g["memory · L2 ports"].push(l);
+    else g["memory · HBM"].push(l);
+  }
+  return g;
+}
+function ganttSvg(tl,widthPx){
+  if(!tl||!tl.steady||!tl.steady.length) return `<div class="hint">no timeline for this kernel</div>`;
+  const groups=unitGroups(tl.lanes||[]);
+  const rowH=15,left=100,right=widthPx-10,top=6;
+  const span=Math.max(1e-12,...tl.steady.map(i=>i.end));
+  let y=top,parts=[];
+  for(const [gname,lanes] of Object.entries(groups)){
+    if(!lanes.length) continue;
+    parts.push(`<text x="2" y="${y+10}" font-size="9" fill="currentColor" opacity=".55">${esc(gname.toUpperCase())}</text>`);
+    y+=rowH;
+    for(const lane of lanes){
+      parts.push(`<text x="${left-6}" y="${y+9}" font-size="9" text-anchor="end" fill="currentColor">${esc(lane)}</text>`);
+      parts.push(`<rect x="${left}" y="${y}" width="${right-left}" height="10" fill="currentColor" opacity=".08"/>`);
+      for(const it of tl.steady){
+        const v=it.lanes[lane]; if(!v) continue;
+        const x0=left+(right-left)*it.start/span, w=Math.max(0.6,(right-left)*v/span);
+        parts.push(`<rect x="${x0.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="10" `+
+          `fill="${LANE_RGB[lane]||'#9a8f7a'}"><title>${esc(lane)}: ${esc(it.action)} `+
+          `${(v*1e9).toFixed(1)} ns (round ${it.round}${it.iteration!==undefined?`, iter ${it.iteration}`:""})</title></rect>`);
+      }
+      y+=rowH;
+    }
+  }
+  const h=y+16;
+  parts.push(`<line x1="${left}" y1="${top}" x2="${left}" y2="${h-14}" stroke="currentColor" opacity=".15"/>`);
+  parts.push(`<text x="${left}" y="${h-2}" font-size="9" fill="currentColor" opacity=".6">0</text>`);
+  parts.push(`<text x="${right}" y="${h-2}" font-size="9" text-anchor="end" fill="currentColor" opacity=".6">`+
+    `${(span*1e9).toFixed(0)} ns / ${(span*tl.clock_hz).toFixed(0)} cycles · ${tl.rounds_shown} round(s) shown</text>`);
+  return `<svg width="${widthPx}" height="${h}" viewBox="0 0 ${widthPx} ${h}" style="display:block">${parts.join("")}</svg>`;
+}
+function updateGantt(){
+  const r=PHASE_RESULTS&&PHASE_RESULTS[CUR_PHASE]; if(!r) return;
+  const zoom=parseFloat($("ganttZoom").value);
+  $("ganttZoomLabel").textContent=zoom.toFixed(1)+"x";
+  $("ganttWrap").innerHTML=ganttSvg(r.timeline,Math.round(820*zoom));
+}
+
+let PHASE_RESULTS=null, CUR_PHASE="decode", LAST_SECS=0;
+function showResults(both,secs){
+  PHASE_RESULTS=both; LAST_SECS=secs;
+  CUR_PHASE=both.decode?"decode":Object.keys(both)[0];
+  renderResultsShell();
+}
+function switchPhase(p){ CUR_PHASE=p; renderResultsShell(); }
+function renderResultsShell(){
+  const phases=Object.keys(PHASE_RESULTS);
+  const tabs=phases.map(p=>`<button class="ghost" `+
+    `style="border-color:${p===CUR_PHASE?'var(--accent)':'var(--line)'};font-weight:${p===CUR_PHASE?700:400};`+
+    `text-transform:capitalize" onclick="switchPhase('${p}')">${esc(p)}`+
+    `${p==="prefill"?" (processing the prompt)":p==="decode"?" (one token-generation step)":""}</button>`).join(" ");
+  $("results").innerHTML=(phases.length>1?`<div style="display:flex;gap:8px;margin-bottom:14px">${tabs}</div>`:"")
+    + `<div id="phasebody"></div>`;
+  renderPhaseBody(PHASE_RESULTS[CUR_PHASE]);
+}
+function renderPhaseBody(r){
+  const m=r.memory, secs=LAST_SECS;
+  $("phasebody").innerHTML=`
   <div class="kpis">
     <div class="kpi"><b>${r.step_ms.toFixed(2)} ms</b><span>per layer stack</span></div>
     <div class="kpi"><b>${m.total_GB.toFixed(1)} GB</b><span>memory / GPU</span></div>
     <div class="kpi"><b>${r.bounds.by_resource[0]?.name||"—"}</b><span>top bound</span></div>
     <div class="kpi"><b>${secs.toFixed(1)} s</b><span>compute time</span></div></div>
   <div class="row" style="margin:0 0 14px">
-    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB)">trace Excel (per cycle, grouped by unit)</button>
-    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB+'&full=1')">Excel · whole kernel</button>
-    <button class="ghost" onclick="window.open(API+'/api/csv?job='+JOB)">CSV</button>
-    <button class="ghost" onclick="window.open(API+'/api/pdf?job='+JOB)">PDF report</button>
+    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE)">trace Excel (per cycle, grouped by unit)</button>
+    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE+'&full=1')">Excel · whole kernel</button>
+    <button class="ghost" onclick="window.open(API+'/api/csv?job='+JOB+'&phase='+CUR_PHASE)">CSV</button>
+    <button class="ghost" onclick="window.open(API+'/api/pdf?job='+JOB+'&phase='+CUR_PHASE)">PDF report</button>
   </div>
   ${r.by_block?`<div class="sec"><h2>the model's three blocks</h2>
     <div class="kpis">${Object.entries(r.by_block).map(([k,v])=>
@@ -359,6 +434,15 @@ function showResults(r,secs){
   <div class="sec"><h2>by resource and tensor</h2>
     <div class="scroll"><table><thead><tr><th>resource:tensor</th><th class="num">share</th></tr></thead>
     <tbody>${bars(r.bounds.by_tensor.slice(0,10))}</tbody></table></div></div>
+  ${r.timeline?`<div class="sec"><h2>steady-state timeline${r.trace_kernel?` — ${esc(r.trace_kernel)}`:""}</h2>
+    <div class="hint">the heaviest kernel's steady-state rounds, lane by lane (same picture as the PDF report).
+      Drag to stretch it out and see one round in detail.</div>
+    <div style="display:flex;align-items:center;gap:8px;margin:8px 0">
+      <input type="range" id="ganttZoom" min="1" max="8" step="0.5" value="2" style="width:200px" oninput="updateGantt()">
+      <span id="ganttZoomLabel" class="hint">2.0x</span>
+    </div>
+    <div id="ganttWrap" style="overflow-x:auto;border:1px solid var(--line);border-radius:8px;padding:6px 0"></div>
+  </div>`:""}
   <div class="sec"><h2>operators</h2><div class="scroll"><table>
     <thead><tr><th>op</th><th class="num">x</th><th>tile</th><th class="num">time</th>
     <th class="num">share</th><th>occupancy</th><th>bound</th></tr></thead><tbody>
@@ -369,6 +453,7 @@ function showResults(r,secs){
   <details class="sec"><summary>text report</summary><pre class="mono">${r.summary}</pre></details>
   <div class="row"><button class="ghost" onclick="go(3)">change workload</button>
     <button class="ghost" onclick="go(1)">change GPU</button></div>`;
+  if(r.timeline) updateGantt();
 }
 init();
 </script>
