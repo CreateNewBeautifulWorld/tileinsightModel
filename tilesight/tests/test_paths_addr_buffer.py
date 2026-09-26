@@ -619,3 +619,34 @@ def test_config_is_the_only_interface_between_gpu_and_model():
     # 4. validation catches typos and missing required fields
     bad = HardwareSpec({"name": "x", "sms": 1, "memory": {"l2": {"capcity_MB": 1}}}).validate()
     assert any("unknown field" in p for p in bad) and any("missing required" in p for p in bad)
+
+
+def test_memmap_report_lays_tensors_out_from_0x80000000(tmp_path):
+    """Every tensor is one contiguous, 2 MB-aligned region from memory.addressing.base
+    (default 0x8000_0000); the report spreads each over the HBM ports exactly and writes
+    CSV + Excel (address-space and per-port charts) + text."""
+    import random
+    from openpyxl import load_workbook
+    from tilesight.gpuTilingPerfHWModel.genResult.addressing import AddressMap
+    from tilesight.gpuTilingPerfHWModel.genResult.memmap_report import memmap_json, port_bytes, write_all
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.memmap import build_memory_map
+    assert HW.get("memory.addressing.base") == 0x80000000
+    ddr = AddressMap.from_hw(HW, "ddr")
+    rnd = random.Random(1)
+    for _ in range(50):                                   # exact against a byte-by-byte count
+        a, n = rnd.randrange(1 << 20), rnd.randrange(1, 20000)
+        ref = [0] * ddr.ports
+        for x in range(a, a + n):
+            ref[ddr.port_of(x)] += 1
+        assert port_bytes(ddr, a, n) == ref
+    mm = build_memory_map(ModelSpec.load("kimi_k2.hf"), RunConfig(phase="decode", batch=64, seq_len=4096, dp=8))
+    assert mm.regions[0].base == 0x80000000 and all(r.base % (2 << 20) == 0 for r in mm.regions)
+    j = memmap_json(mm, HW)
+    assert j["totals"]["weight"] > 0 and j["totals"]["kv"] > 0
+    assert sum(j["rows"][0]["hbm"]) == pytest.approx(mm.regions[0].size, abs=ddr.ports)
+    paths = write_all(mm, HW, tmp_path, "mm")
+    wb = load_workbook(paths["xlsx"])
+    assert {"regions", "address_map", "hbm_ports", "summary"} <= set(wb.sheetnames)
+    assert wb["address_map"]._charts and wb["hbm_ports"]._charts
+    assert wb["regions"]["D2"].value == "0x000080000000"
+    assert paths["csv"].read_text().count("\n") == len(mm.regions) + 1

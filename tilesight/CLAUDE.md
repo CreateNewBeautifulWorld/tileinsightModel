@@ -78,6 +78,8 @@ tilesight/                   (this directory - both the project root and the pac
                                 its data from whatever interfaceAndRun/runner.py already computed.
       report/table.py, report/timeline.py (Fig-3e schedule reconstruction), report/figure3.py
       (Fig 3 d/e/f artifact), report/addressing.py, report/excel.py, report/pdfreport.py
+      memmap_report.py: HBM address map (every tensor's region from 0x8000_0000, bytes per HBM
+      port) -> out/memmap/*.csv|xlsx|txt and the results page's address-map section
     out/                        the real output: where a run's generated trace/xlsx/pdf/svg
                                 files land (git-ignored except a .gitkeep; created on demand)
   gpuPresets/                 GPU YAML presets (b200.yaml, b300.yaml, h200.yaml, mi300x.yaml, ...)

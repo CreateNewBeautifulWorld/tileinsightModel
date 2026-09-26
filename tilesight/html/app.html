@@ -441,6 +441,51 @@ function updateGantt(){
   $("ganttWrap").innerHTML=ganttSvg(r.timeline,Math.round(820*zoom));
 }
 
+const MM_KIND={weight:"#4f7cac",kv:"#b3563a",act:"#7f9a52",workspace:"#c2903a"};
+function memmapHtml(mm){
+  if(!mm) return "";
+  if(mm.error) return `<div class="sec"><h2>HBM address map</h2><div class="hint">not available: ${esc(mm.error)}</div></div>`;
+  const W=820, span=Math.max(1,mm.span), GB=x=>(x/1e9).toFixed(2);
+  const strip=mm.rows.map(r=>`<rect x="${(W*r.offset/span).toFixed(2)}" y="0" width="${Math.max(0.6,W*r.size/span).toFixed(2)}" height="26" fill="${MM_KIND[r.kind]||"#999"}"><title>${esc(r.name)} · ${r.base}–${r.end} · ${(r.size/1e6).toFixed(1)} MB</title></rect>`).join("");
+  const ticks=[0,.25,.5,.75,1].map(f=>`<text x="${Math.min(W-2,Math.max(2,f*W))}" y="40" font-size="10" fill="var(--muted)" text-anchor="${f===0?"start":f===1?"end":"middle"}">0x${(mm.base+Math.round(f*span)).toString(16)}</text>`).join("");
+  const kinds=Object.keys(mm.per_port_by_kind), P=mm.hbm_ports;
+  const portTot=[...Array(P).keys()].map(p=>kinds.reduce((a,k)=>a+mm.per_port_by_kind[k][p],0));
+  const pmax=Math.max(1,...portTot), bw=Math.min(60,(W-40)/P), H=120;
+  const ports=[...Array(P).keys()].map(p=>{let y=H; return kinds.map(k=>{const h=H*mm.per_port_by_kind[k][p]/pmax; y-=h;
+      return `<rect x="${30+p*bw+2}" y="${y.toFixed(1)}" width="${bw-4}" height="${h.toFixed(1)}" fill="${MM_KIND[k]||"#999"}"><title>port${p} · ${k} ${GB(mm.per_port_by_kind[k][p])} GB</title></rect>`;}).join("")
+      +`<text x="${30+p*bw+bw/2}" y="${H+12}" font-size="10" fill="var(--muted)" text-anchor="middle">${p}</text>`;}).join("");
+  const legend=Object.entries(mm.totals).map(([k,v])=>`<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px"><i style="width:10px;height:10px;background:${MM_KIND[k]||"#999"};display:inline-block;border-radius:2px"></i>${k} ${GB(v)} GB</span>`).join("");
+  return `<div class="sec"><h2>HBM address map — where every tensor lives</h2>
+    <div class="hint">each tensor is one contiguous region, 2 MB-aligned, allocated in execution order from
+      <span class="mono">${mm.base_hex}</span> to <span class="mono">${mm.end_hex}</span>
+      (${GB(mm.span)} GB${mm.capacity?` of ${GB(mm.capacity)} GB HBM`:""}, ${mm.regions} regions).
+      ${esc(mm.hbm_map)}; ${esc(mm.l2_map)}.</div>
+    <div style="margin:8px 0">${legend}</div>
+    <svg viewBox="0 0 ${W} 44" width="100%" style="max-width:${W}px">${strip}${ticks}</svg>
+    <div class="hint" style="margin-top:8px">bytes per HBM port, by tensor kind (the interleave spreads every region over all ports)</div>
+    <svg viewBox="0 0 ${W} ${H+16}" width="100%" style="max-width:${W}px">
+      <text x="0" y="10" font-size="10" fill="var(--muted)">${GB(pmax)} GB</text>${ports}</svg>
+    <div class="row" style="margin:8px 0">
+      <input id="mmFilter" placeholder="filter regions (e.g. kv, experts, layer 3)" style="max-width:320px" oninput="memmapTable()">
+      <button class="ghost" onclick="downloadFile(this,API+'/api/memmap?job='+JOB+'&phase='+CUR_PHASE,'memmap.xlsx')">address map Excel (with charts)</button>
+      <button class="ghost" onclick="downloadFile(this,API+'/api/memmap?job='+JOB+'&phase='+CUR_PHASE+'&fmt=csv','memmap.csv')">CSV</button>
+    </div>
+    <div class="scroll" id="mmTable"></div>
+    ${mm.files?`<div class="hint">also written to <span class="mono">${esc(mm.files.xlsx||"")}</span></div>`:""}
+  </div>`;
+}
+function memmapTable(){
+  const el=$("mmTable"); if(!el) return;
+  const mm=(PHASE_RESULTS[CUR_PHASE]||{}).memmap; if(!mm||!mm.rows) return;
+  const q=(($("mmFilter")||{}).value||"").toLowerCase();
+  const rows=mm.rows.filter(r=>!q||(r.name+" "+r.kind).toLowerCase().includes(q));
+  el.innerHTML=`<table><thead><tr><th>region</th><th>kind</th><th>base</th><th>end</th><th class="num">size</th>
+    <th>shape</th><th class="num">HBM imbalance</th></tr></thead><tbody>${rows.slice(0,80).map(r=>
+    `<tr><td class="mono">${esc(r.name)}</td><td><i style="width:9px;height:9px;background:${MM_KIND[r.kind]||"#999"};display:inline-block;border-radius:2px"></i> ${r.kind}</td>
+    <td class="mono">${r.base}</td><td class="mono">${r.end}</td><td class="num">${(r.size/1e6).toFixed(1)} MB</td>
+    <td class="mono">${esc(r.shape)}</td><td class="num">${r.imb.toFixed(3)}</td></tr>`).join("")}</tbody></table>
+    <div class="hint">${rows.length>80?`showing 80 of ${rows.length} matching regions — the Excel/CSV has all of them`:`${rows.length} regions`}${mm.truncated?` (+${mm.truncated} not sent to the page)`:""}</div>`;
+}
 let PHASE_RESULTS=null, CUR_PHASE="decode", LAST_SECS=0;
 function showResults(r,secs){
   // mode "workload" (single phase) returns one flat result; mode "workload_both" returns
@@ -495,6 +540,7 @@ function renderPhaseBody(r){
     </tbody></table></div>
     <div class="hint">flash is ${r.attn_compare.speedup_of_flash.toFixed(2)}x faster here and saves
       ${r.attn_compare.extra_activation_GB_without_flash.toFixed(1)} GB of activations.</div></div>`:""}
+  ${memmapHtml(r.memmap)}
   <h2>GPU architecture (as configured)</h2>
   <div class="scroll">${r.arch_svg||""}</div>
   <div class="sec"><h2>where the time goes</h2>
@@ -523,6 +569,7 @@ function renderPhaseBody(r){
   <div class="row"><button class="ghost" onclick="go(3)">change workload</button>
     <button class="ghost" onclick="go(1)">change GPU</button></div>`;
   if(r.timeline) updateGantt();
+  if(r.memmap) memmapTable();
 }
 init();
 </script>

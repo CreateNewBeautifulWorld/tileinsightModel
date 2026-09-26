@@ -138,6 +138,8 @@ def main(argv=None):
     mp.add_argument("--base", default="0x80000000", help="base offset (hex or decimal)")
     mp.add_argument("--limit", type=int, default=40)
     mp.add_argument("--csv")
+    mp.add_argument("--out", default=None,
+                    help="directory for the CSV/Excel/text address map (default out/memmap)")
 
     sp = sub.add_parser("serve")
     sp.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to let other machines reach it")
@@ -335,6 +337,11 @@ def main(argv=None):
                 for r in mm.regions:
                     f.write(f"{r.name},{r.kind},0x{r.base:x},{r.size},{r.rows},{r.cols},{r.elem_bytes}\n")
             print(f"\nwritten to {a.csv} ({len(mm.regions)} regions)")
+        from tilesight.gpuTilingPerfHWModel.genResult.memmap_report import write_all
+        hw_ = HardwareSpec.load(a.cur_gpu_config)
+        stem = f"memmap_{a.model.split('.')[0]}_{hw_.name}_{a.phase}"
+        for kind, p in write_all(mm, hw_, a.out, stem, f"{a.model} on {hw_.name}, {a.phase}").items():
+            print(f"{kind}: {p}")
         return
     if a.cmd == "buffer":
         from tilesight.gpuTilingPerfHWModel.model.dse.buffer import best_alloc, capacity_curve, optimize_buffer, profile_classes, with_buffer

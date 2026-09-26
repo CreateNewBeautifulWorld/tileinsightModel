@@ -205,6 +205,21 @@ def _sim_window_json(rep, cur_gpu_config) -> dict:
             "full": sum(1 for c, _, _ in cov if c >= 0.999), "kernels": len(cov)}
 
 
+def _memmap_json(model_spec, rc, cur_gpu_config, prog) -> dict:
+    """Where every tensor sits in HBM (contiguous, 2 MB-aligned regions from
+    memory.addressing.base) and how it spreads over the HBM ports; also written to out/memmap
+    as CSV + Excel, which /api/memmap serves."""
+    from tilesight.gpuTilingPerfHWModel.genResult.memmap_report import memmap_json, write_all
+    from tilesight.gpuTilingPerfHWModel.interfaceAndRun.memmap import build_memory_map
+    prog(1, 1, "allocating the HBM memory map")
+    mm = build_memory_map(model_spec, rc, base=int(cur_gpu_config.get("memory.addressing.base")))
+    out = memmap_json(mm, cur_gpu_config)
+    stem = f"memmap_{getattr(model_spec, 'name', 'model')}_{cur_gpu_config.name}_{rc.phase}".replace(" ", "_")
+    out["files"] = {k: str(v) for k, v in write_all(mm, cur_gpu_config, None, stem,
+                                                     f"{getattr(model_spec, 'name', '')} on {cur_gpu_config.name}, {rc.phase}").items()}
+    return out
+
+
 def _workload_report_json(rep, wl: dict, cur_gpu_config, cfg: dict, prog) -> dict:
     """Everything the results page shows for one phase's report — shared by the single-phase
     "workload" mode and the prefill+decode "workload_both" mode (one call per phase)."""
@@ -221,6 +236,11 @@ def _workload_report_json(rep, wl: dict, cur_gpu_config, cfg: dict, prog) -> dic
     out["arch_svg"] = arch_svg(cur_gpu_config)
     out["gpu_name"] = cur_gpu_config.name
     out["sim_window"] = _sim_window_json(rep, cur_gpu_config)
+    try:
+        from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import to_model_spec
+        out["memmap"] = _memmap_json(to_model_spec(wl), rep.rc, cur_gpu_config, prog)
+    except Exception as e:                              # never lose the run over the map
+        out["memmap"] = {"error": str(e)}
     # attach the heaviest kernel's timeline so the Excel / CSV / PDF downloads AND the inline
     # Gantt view on the results page work
     prog(1, 1, "building the trace of the heaviest kernel")
@@ -354,6 +374,7 @@ def _work(job_id: str, mode: str, cfg: dict) -> None:
         if mode == "run":
             rep = run(cur_gpu_config, cur_model_config, progress=prog)
             out = _model_json(rep)
+            out["memmap"] = _memmap_json(model, rc, cur_gpu_config, prog)
         elif mode == "request":
             r = run_request(model, cur_gpu_config, rc, progress=prog)
             out = {"summary": request_summary(r), "ttft_ms": r.ttft_s * 1e3,
@@ -476,6 +497,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type",
                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             self.send_header("Content-Disposition", "attachment; filename=tilesight_cycles.xlsx")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return self.wfile.write(body)
+        if path == "/api/memmap":                   # the job's HBM address map, as xlsx or csv
+            q = dict(p.split("=", 1) for p in self.path.split("?", 1)[-1].split("&") if "=" in p)
+            with _LOCK:
+                job = _JOBS.get(q.get("job", ""))
+            res = (job or {}).get("result") or {}
+            if (job or {}).get("mode") == "workload_both":
+                res = res.get(q.get("phase", "decode"), {})
+            fmt = "csv" if q.get("fmt") == "csv" else "xlsx"
+            f = ((res.get("memmap") or {}).get("files") or {}).get(fmt)
+            if not f or not Path(f).exists():
+                return self._json(404, {"error": "no memory map for this job"})
+            body = Path(f).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv" if fmt == "csv" else
+                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", f"attachment; filename={Path(f).name}")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()

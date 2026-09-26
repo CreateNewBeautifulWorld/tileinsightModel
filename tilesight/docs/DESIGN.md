@@ -368,6 +368,17 @@ outputs and split partials through the L2 ports.
 All trace addresses start at `memory.addressing.base` (default 0x8000_0000, 2 MB-aligned), and so
 do the memory map and the CLI address dumps.
 
+**HBM address map output** (`genResult/memmap_report.py`). The per-GPU memory map
+(`interfaceAndRun/memmap.py`: every tensor one contiguous, 2 MB-aligned region, allocated in
+execution order — weights layer by layer, then the KV cache per attention layer, then
+double-buffered activations and a workspace) is written to `out/memmap/` as CSV, text and Excel
+(`regions`; `address_map`, a Gantt-style chart of the address space by tensor kind; `hbm_ports`,
+bytes per HBM port by kind, stacked; `summary`). Per-port bytes come from the interleave map
+exactly (whole stripes counted, partial first/last stripe trimmed), not sampled. Every web run
+shows the same map on the results page (address strip, per-port bars, a filterable region table,
+Excel/CSV download via `/api/memmap`). Standalone: `python -m
+tilesight.gpuTilingPerfHWModel.genResult.memmap_report ...` or `tilesight memmap ... [--out DIR]`.
+
 See
 `tests/test_paths_addr_buffer.py` (`test_fetch_modes_*`, `test_l2_op_bytes_*`,
 `test_b200_with_buffer_*`).

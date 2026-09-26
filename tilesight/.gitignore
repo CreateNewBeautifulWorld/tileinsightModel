@@ -3,3 +3,6 @@ __pycache__/
 *.so
 *.egg-info/
 .pytest_cache/
+# generated outputs (reports, traces, memory maps); keep the folders
+gpuTilingPerfHWModel/out/*/*
+!gpuTilingPerfHWModel/out/*/.gitkeep

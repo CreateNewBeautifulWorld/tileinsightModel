@@ -131,6 +131,14 @@ def test_workload_job_reports_progress_and_downloads(url):
     r = j["result"]
     assert r["arch_svg"].startswith("<svg") and r["timeline"] and r["trace_kernel"]
     assert any(":" in line and "→" in line for line in j["log"])      # file:function shown live
+    # the HBM address map: every tensor a contiguous region from 0x8000_0000, drawn on the page
+    # and downloadable (Excel with charts, CSV), also written under out/memmap
+    mm = r["memmap"]
+    assert mm["base_hex"] == "0x80000000" and mm["rows"] and mm["rows"][0]["base"] == "0x000080000000"
+    assert sum(sum(v) for v in mm["per_port_by_kind"].values()) == pytest.approx(sum(x["size"] for x in mm["rows"]))
+    for fmt, ctype in (("xlsx", "spreadsheet"), ("csv", "text/csv")):
+        resp = urllib.request.urlopen(f"{url}/api/memmap?job={jid}&fmt={fmt}")
+        assert ctype in resp.headers["Content-Type"] and len(resp.read()) > 100
     for ep, ctype in (("xlsx", "spreadsheet"), ("csv", "text/csv"), ("pdf", "application/pdf")):
         resp = urllib.request.urlopen(f"{url}/api/{ep}?job={jid}")
         assert ctype in resp.headers["Content-Type"] and len(resp.read()) > 1000
