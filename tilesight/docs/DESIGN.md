@@ -46,7 +46,7 @@ The paper's fixed vector ⟨TC, CUDA, SFU, TMEM, SMEM, L1.5, L2, DDR, Net⟩ bec
 | `cuda` | compute.cuda_fp32_tflops | seconds on one SM | |
 | `sfu` | compute.sfu_tops | seconds on one SM | |
 | `<onchip>` (smem, tmem, …) | memory.onchip.* | seconds on one SM | bytes/clk or TB/s per SM |
-| `path:<p>` (tma, lsu, …) | load_paths.* | seconds on one SM | per_sm_GBps |
+| `path:<p>` (tma, lsu, …) | load_paths.* | seconds on one SM | per_sm_bytes_per_clk x clock |
 | `l2` | memory.l2 | **bytes** | min(BW·eff / active_SMs, per_sm_max) |
 | `ddr` | memory.ddr | **bytes** | min(BW·eff / active_SMs, per_sm_max) |
 

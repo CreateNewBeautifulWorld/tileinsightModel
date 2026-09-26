@@ -30,8 +30,8 @@ memory:
     smem: {capacity_KB: 228, bytes_per_clk: 128, latency_cycles: 30}
     # no tmem on Hopper: accumulators live in registers
 load_paths:
-  tma: {engine: dma, per_sm_GBps: 160, latency_ns: 100, smem_direct: true, multicast: true, regs_per_thread: 0, issue_bytes_per_clk: 0}
-  lsu: {engine: lsu, per_sm_GBps: 110, latency_ns: 50, smem_direct: false, multicast: false, regs_per_thread: 16, issue_bytes_per_clk: 64}
+  tma: {engine: dma, per_sm_bytes_per_clk: 87.43, latency_ns: 100, smem_direct: true, multicast: true, regs_per_thread: 0, issue_bytes_per_clk: 0}
+  lsu: {engine: lsu, per_sm_bytes_per_clk: 60.11, latency_ns: 50, smem_direct: false, multicast: false, regs_per_thread: 16, issue_bytes_per_clk: 64}
 occupancy: {max_blocks_per_sm: 32, max_threads_per_sm: 2048, regs_per_sm: 65536, max_regs_per_thread: 255}
 network:
   nvlink: {domain_size: 8, bandwidth_GBps: 450, alpha_us: 3.0}

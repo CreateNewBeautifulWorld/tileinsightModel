@@ -59,9 +59,9 @@ memory:
     smem: {capacity_KB: 160, bytes_per_clk: 128, latency_cycles: 40}   # [calib] CDNA4 value carried over
 
 load_paths:
-  tdm: {engine: dma, per_sm_GBps: 220, latency_ns: 110, smem_direct: true, multicast: true, regs_per_thread: 0, issue_bytes_per_clk: 0}         # [calib] CDNA5 Tensor Data Mover (async global->LDS)
-  buffer_lds: {engine: dma, per_sm_GBps: 160, latency_ns: 120, smem_direct: true, multicast: false, regs_per_thread: 0, issue_bytes_per_clk: 0}
-  lsu: {engine: lsu, per_sm_GBps: 100, latency_ns: 80, smem_direct: false, multicast: false, regs_per_thread: 16, issue_bytes_per_clk: 64}
+  tdm: {engine: dma, per_sm_bytes_per_clk: 91.67, latency_ns: 110, smem_direct: true, multicast: true, regs_per_thread: 0, issue_bytes_per_clk: 0}         # [calib] CDNA5 Tensor Data Mover (async global->LDS)
+  buffer_lds: {engine: dma, per_sm_bytes_per_clk: 66.67, latency_ns: 120, smem_direct: true, multicast: false, regs_per_thread: 0, issue_bytes_per_clk: 0}
+  lsu: {engine: lsu, per_sm_bytes_per_clk: 41.67, latency_ns: 80, smem_direct: false, multicast: false, regs_per_thread: 16, issue_bytes_per_clk: 64}
 load_paths_default: tdm
 
 occupancy: {max_blocks_per_sm: 16, max_threads_per_sm: 2048, regs_per_sm: 131072, max_regs_per_thread: 512}

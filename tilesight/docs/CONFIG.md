@@ -205,7 +205,7 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 
 | field | type | unit | default | tag | meaning |
 |---|---|---|---|---|---|
-| `load_paths` | map | — | **required** | spec | One entry per path (tma, lsu, buffer_lds, tdm ...), each with: engine (dma|lsu), per_sm_GBps, latency_ns (issue overhead), smem_direct, multicast, regs_per_thread, issue_bytes_per_clk |
+| `load_paths` | map | — | **required** | spec | One entry per path (tma, lsu, buffer_lds, tdm ...), each with: engine (dma|lsu), per_sm_bytes_per_clk (this path's own clock domain, same as every other on-chip lane — scales with core.freq_ghz), latency_ns (issue overhead), smem_direct, multicast, regs_per_thread, issue_bytes_per_clk |
 | `load_paths_default` | str | — | `` | spec | Path a request resolves to when the named one does not exist on this part |
 
 ## occupancy

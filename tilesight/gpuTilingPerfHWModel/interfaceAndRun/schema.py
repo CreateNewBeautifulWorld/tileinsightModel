@@ -274,8 +274,9 @@ FIELDS: tuple[Field, ...] = (
     # ---------------------------------------------------------------- load paths
     F("load_paths", "map", "", REQUIRED, "spec", "load_paths",
       "One entry per path (tma, lsu, buffer_lds, tdm ...), each with: engine (dma|lsu), "
-      "per_sm_GBps, latency_ns (issue overhead), smem_direct, multicast, regs_per_thread, "
-      "issue_bytes_per_clk"),
+      "per_sm_bytes_per_clk (this path's own clock domain, same as every other on-chip lane — "
+      "scales with core.freq_ghz), latency_ns (issue overhead), smem_direct, multicast, "
+      "regs_per_thread, issue_bytes_per_clk"),
     F("load_paths_default", "str", "", "", "spec", "load_paths",
       "Path a request resolves to when the named one does not exist on this part"),
 

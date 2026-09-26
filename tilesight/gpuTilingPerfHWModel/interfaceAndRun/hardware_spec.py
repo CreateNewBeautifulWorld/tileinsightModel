@@ -273,7 +273,11 @@ class HardwareSpec:
         p = self.get(f"load_paths.{self.resolve_path(path)}")
         if p is None:
             return 0.0
-        return nbytes / (p["per_sm_GBps"] * 1e9)
+        # bytes/clk, like every other on-chip lane (memory.l1.bytes_per_clk, smem.bytes_per_clk,
+        # switch_bytes_per_clk) — this path shares the shader core's own clock domain, so its
+        # bandwidth scales with core.freq_ghz the same way theirs do, instead of being a fixed
+        # absolute GB/s number that ignores a clock override.
+        return nbytes / (p["per_sm_bytes_per_clk"] * self.clock_hz)
 
     def path_latency_s(self, path: str) -> float:
         return float(self.get(f"load_paths.{self.resolve_path(path)}.latency_ns", 800)) * 1e-9
