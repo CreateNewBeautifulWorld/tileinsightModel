@@ -36,4 +36,4 @@ dtypes:
 run:
   phase: decode
   batch: 32                # sequences resident on this GPU
-  seq_len: 8192            # KV length now (use max_seq_len for the capacity question)
+  cur_decoding_seq_len: 8192   # KV length now (use max_seq_len for the capacity question)

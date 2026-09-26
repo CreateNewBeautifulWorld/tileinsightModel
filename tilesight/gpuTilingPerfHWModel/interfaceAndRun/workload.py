@@ -72,16 +72,18 @@ WORKLOAD_FIELDS: tuple[WField, ...] = (
     W("dtypes.attn_compute", "str", "", "bf16", "dtypes", "Tensor-core datapath inside attention"),
 
     W("run.phase", "str", "", "decode", "run",
-      "decode (1 token/sequence) | prefill (seq tokens); only used for a single-phase run "
-      "(run_workload()) — run_workload_both_phases() ignores this and runs both"),
+      "both (prefill+decode, run_workload_both_phases()) | decode (1 token/sequence, at "
+      "cur_decoding_seq_len) | prefill (run.prefill_seq_len tokens) — the single-phase path "
+      "(run_workload()) uses whichever of the two lengths matches the phase, so there's no "
+      "separate seq_len field to keep in sync with them"),
     W("run.batch", "int", "sequences", 32, "run", "Sequences resident on this GPU"),
-    W("run.seq_len", "int", "tokens", 8192, "run",
-      "KV length (decode) or prompt length (prefill); only used for a single-phase run"),
     W("run.prefill_seq_len", "int", "tokens", 4096, "run",
-      "Prompt length for the prefill-phase run in run_workload_both_phases()"),
+      "Prompt length for the prefill phase (run_workload_both_phases(), or run_workload() "
+      "when run.phase = prefill)"),
     W("run.cur_decoding_seq_len", "int", "tokens", 8192, "run",
-      "KV length for the decode-phase run in run_workload_both_phases() — decode always models "
-      "ONE token-generation step at a given KV length, so this is where that step is taken"),
+      "KV length for the decode phase (run_workload_both_phases(), or run_workload() when "
+      "run.phase = decode) — decode always models ONE token-generation step at a given KV "
+      "length, so this is where that step is taken"),
     W("run.max_seq_len", "int", "tokens", 16384, "run",
       "The longest sequence this GPU must hold KV for — sizes the KV cache (see memory_breakdown()"
       " and the run.max_seq_len > run.prefill_seq_len + run.cur_decoding_seq_len check in "
@@ -178,10 +180,16 @@ def to_model_spec(cfg: dict):
 
 
 def to_run_config(cfg: dict):
-    """RunConfig for a single GPU: no TP/DP/EP, everything resident here."""
+    """RunConfig for a single GPU: no TP/DP/EP, everything resident here.
+
+    seq_len comes from whichever of prefill_seq_len/cur_decoding_seq_len matches run.phase —
+    there's no separate single-phase seq_len field to keep in sync with those two."""
     from tilesight.gpuTilingPerfHWModel.interfaceAndRun.run_config import RunConfig
-    return RunConfig(phase=get(cfg, "run.phase"), batch=int(get(cfg, "run.batch")),
-                     seq_len=int(get(cfg, "run.seq_len")), tp=1, dp=1, ep=1,
+    phase = get(cfg, "run.phase")
+    seq_len = int(get(cfg, "run.prefill_seq_len") if phase == "prefill"
+                  else get(cfg, "run.cur_decoding_seq_len"))
+    return RunConfig(phase=phase, batch=int(get(cfg, "run.batch")),
+                     seq_len=seq_len, tp=1, dp=1, ep=1,
                      weight_dtype=get(cfg, "dtypes.weight"), expert_dtype=get(cfg, "dtypes.expert"),
                      act_dtype=get(cfg, "dtypes.activation"), kv_dtype=get(cfg, "dtypes.kv"),
                      compute_dtype=get(cfg, "dtypes.compute"),
@@ -206,8 +214,9 @@ def run_workload_both_phases(cfg: dict, cur_gpu_config, progress=None) -> dict:
 
     prefill runs at run.prefill_seq_len (the prompt); decode runs at run.cur_decoding_seq_len
     (one token-generation step at that KV length — decode is always a single step, so this is
-    where that step is taken). Ignores run.phase/run.seq_len entirely — those are for
-    run_workload()'s single-phase path. Raises ValueError (via validate_workload(), which
+    where that step is taken). Ignores run.phase entirely — that's for run_workload()'s
+    single-phase path, where it picks which of the two lengths to use instead.
+    Raises ValueError (via validate_workload(), which
     includes the run.max_seq_len > prefill_seq_len + cur_decoding_seq_len check) if cfg is
     invalid. Returns {"prefill": ModelReport, "decode": ModelReport}."""
     problems = validate_workload(cfg)
@@ -231,8 +240,8 @@ def memory_breakdown(cfg: dict, cur_gpu_config=None) -> dict:
     only narrows what's on the compute path, never what's resident) + shared experts, x layers.
     KV cache: MLA stores the latent (kv_lora + rope) per token per layer; GQA/MHA store
     kv_heads x (head_dim + v_head_dim). Sized by run.max_seq_len (the "typical max" a request
-    might reach), not run.seq_len — that's the whole point of keeping it separate from wherever
-    the run currently samples a request (run.cur_decoding_seq_len).
+    might reach) — that's the whole point of keeping it separate from wherever the run
+    currently samples a request (run.cur_decoding_seq_len).
 
     Pass `cur_gpu_config` to also check whether that KV cache actually fits in the on-chip
     buffer (compute.tile_policy sizing assumes it does — every KV read hits the buffer,
@@ -267,7 +276,7 @@ def memory_breakdown(cfg: dict, cur_gpu_config=None) -> dict:
                    (per_expert * wb if ff == "mlp" else 0))
     router = D * experts * 2 if ff == "moe" else 0
 
-    seq = int(get(cfg, "run.max_seq_len") or get(cfg, "run.seq_len"))
+    seq = int(get(cfg, "run.max_seq_len"))
     batch = int(get(cfg, "run.batch"))
     kv_cache_GB = kv_per_token * L * seq * batch / 1e9
     out = {

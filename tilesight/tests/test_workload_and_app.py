@@ -17,7 +17,7 @@ HW = HardwareSpec.load("b300")
 WL = {"name": "demo", "hidden": 7168, "layers": 4,
       "attention": {"type": "mla", "heads": 64},
       "ffn": {"type": "moe", "experts": 48, "topk": 8, "d_ff": 2048},
-      "run": {"phase": "decode", "batch": 32, "seq_len": 4096}}
+      "run": {"phase": "decode", "batch": 32, "cur_decoding_seq_len": 4096}}
 
 
 def test_workload_schema_and_validation():
@@ -174,11 +174,15 @@ def test_kimi_k3_preset_memory_matches_the_simulation():
     import yaml
     from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import memory_breakdown
     cfg = yaml.safe_load(open("modelPresets/kimi_k3_10L.yaml"))
-    # max_seq_len sizes the KV cache independently of the seq_len an actual run samples at
-    # (that's the point — see workload.py's memory_breakdown()); run this comparison AT
-    # max_seq_len so it stays a check of the KV-bytes formula, not of the two knobs' (deliberately)
-    # different defaults.
-    cfg["run"]["seq_len"] = cfg["run"]["max_seq_len"] = 16384
+    # max_seq_len sizes the KV cache independently of the length an actual run samples at
+    # (that's the point — see workload.py's memory_breakdown()); run this comparison with
+    # cur_decoding_seq_len one below max_seq_len (validate_workload() requires max_seq_len
+    # strictly greater than prefill_seq_len + cur_decoding_seq_len) so it stays a check of the
+    # KV-bytes formula, not of the two knobs' (deliberately) different defaults — one token out
+    # of 16384 is well inside the 5% tolerance below.
+    cfg["run"]["prefill_seq_len"] = 0
+    cfg["run"]["cur_decoding_seq_len"] = 16383
+    cfg["run"]["max_seq_len"] = 16384
     assert validate_workload(cfg) == []
     m = memory_breakdown(cfg)
     assert m["layers"] == 10 and "16/112" in m["sparsity"]
@@ -268,7 +272,7 @@ def test_model_is_organised_in_three_blocks():
 
 def test_flash_attention_is_a_choice_with_consequences():
     from tilesight.gpuTilingPerfHWModel.interfaceAndRun.workload import compare_attention_impl
-    cfg = dict(WL, run={**WL["run"], "phase": "prefill", "batch": 1, "seq_len": 8192})
+    cfg = dict(WL, run={**WL["run"], "phase": "prefill", "batch": 1, "prefill_seq_len": 8192})
     c = compare_attention_impl(cfg, HW)
     assert c["flash"]["step_ms"] < c["naive"]["step_ms"]
     assert c["speedup_of_flash"] > 1.2

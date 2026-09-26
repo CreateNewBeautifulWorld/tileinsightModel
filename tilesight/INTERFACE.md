@@ -91,13 +91,14 @@ translates it into the flat form. `tilesight gpu --file my_gpu.yaml [--out flat.
   known), `topk` (the sparsity: only `topk` of `experts` are on the compute path, all of
   `experts` are on the memory-footprint / on-chip-buffer path), `d_ff`, `shared_experts`
 - datatypes: weight, expert, activation, **KV cache**, compute, attention compute
-- run: `phase` + `seq_len` (single-phase runs, `run_workload()`), `batch`, and the three
-  lengths `run_workload_both_phases()` (runs prefill and decode together) uses instead:
-  `prefill_seq_len` (the prompt), `cur_decoding_seq_len` (decode is always one token-generation
-  step — this is the KV length that step is taken at) and `max_seq_len` (the capacity
-  question — sizes the KV cache; `validate_workload()` requires `max_seq_len >
-  prefill_seq_len + cur_decoding_seq_len`, headroom for the sequence to keep generating past
-  where `cur_decoding_seq_len` currently samples it)
+- run: `phase` (`both` — the default, `run_workload_both_phases()` — or `decode`/`prefill` for
+  a single-phase `run_workload()`), `batch`, and the three lengths: `prefill_seq_len` (the
+  prompt), `cur_decoding_seq_len` (decode is always one token-generation step — this is the KV
+  length that step is taken at) and `max_seq_len` (the capacity question — sizes the KV cache;
+  `validate_workload()` requires `max_seq_len > prefill_seq_len + cur_decoding_seq_len`,
+  headroom for the sequence to keep generating past where `cur_decoding_seq_len` currently
+  samples it). A single-phase run uses whichever of `prefill_seq_len`/`cur_decoding_seq_len`
+  matches its `phase` — there's no separate `seq_len` field to keep in sync with them.
 - `layers`: how many layers of this kind this GPU holds (default 1)
 
 From the dims, dtypes, layer count and max sequence length alone,
