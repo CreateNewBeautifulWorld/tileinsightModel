@@ -150,6 +150,7 @@
 </main>
 <script>
 const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const API=location.origin.startsWith("http")?location.origin:"http://127.0.0.1:8000";
 let OPTS=null, SCHEMA=null, SLICE=null, GPU="b300", CUSTOM=false, JOB=null, GPU_CONFIG_MODE="flat";
 
@@ -182,7 +183,8 @@ function buildSliceForm(){
       const ctl = opts ? `<select id="${id}" onchange="deriveNow()">${opts.map(o=>`<option${String(f.default)===o?" selected":""}>${o}</option>`).join("")}</select>`
         : (f.kind==="bool" ? `<select id="${id}" onchange="deriveNow()"><option${f.default?" selected":""}>true</option><option${!f.default?" selected":""}>false</option></select>`
         : `<input id="${id}" ${f.kind==="int"||f.kind==="float"?'type="number" step="any"':''} value="${f.default}" onchange="deriveNow()">`);
-      return `<div><label title="${f.doc}">${f.path.split(".").slice(-1)[0]}${f.unit?` (${f.unit})`:""}</label>${ctl}</div>`;
+      return `<div><label>${esc(f.path.split(".").slice(-1)[0])}${f.unit?` (${esc(f.unit)})`:""}</label>${ctl}`
+        + `<div class="hint">${esc(f.doc)}</div></div>`;
     }).join("")+`</div></div>`).join("");
 }
 function collectSlice(){
@@ -276,7 +278,8 @@ function buildWorkloadForm(){
       const ctl = opts ? `<select id="${id}">${opts.map(o=>`<option${String(f.default)===o?" selected":""}>${o}</option>`).join("")}</select>`
         : (f.kind==="bool" ? `<select id="${id}"><option${f.default?" selected":""}>true</option><option${!f.default?" selected":""}>false</option></select>`
         : `<input id="${id}" ${f.kind==="int"?'type="number"':''} value="${f.default}">`);
-      return `<div><label title="${f.doc}">${f.path.split(".").pop()}${f.unit?` (${f.unit})`:""}</label>${ctl}</div>`;
+      return `<div><label>${esc(f.path.split(".").pop())}${f.unit?` (${esc(f.unit)})`:""}</label>${ctl}`
+        + `<div class="hint">${esc(f.doc)}</div></div>`;
     }).join("") + `</div></div>`).join("");
 }
 function collectWorkload(){
