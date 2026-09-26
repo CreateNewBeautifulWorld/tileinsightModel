@@ -66,8 +66,9 @@ def write_excel(tl: dict, path: str, title: str = "", hw_name: str = "", full: b
     # row 1: section band over the unit columns, row 2: the column names
     ws.append([""] * 4 + [g for g, v in groups.items() for _ in v])
     col = 5
-    band = {"shader": "F2E2D8", "L1 / scratchpad": "DCEBE2", "on-chip buffer": "E7EBD6",
-            "DMA": "EDE8DE", "L2 ports": "DCE5F0", "HBM": "F2DED8"}
+    band = {"memory · HBM": "F2DED8", "memory · L2 ports": "DCE5F0", "on-chip buffer": "E7EBD6",
+            "shader slice · load paths": "EDE8DE", "shader slice · L1/scratchpad": "DCEBE2",
+            "shader slice · cores": "F2E2D8"}
     for g, v in groups.items():
         if len(v) > 1:
             ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + len(v) - 1)
@@ -149,6 +150,18 @@ def write_excel(tl: dict, path: str, title: str = "", hw_name: str = "", full: b
     lg.append(["Colour = iteration: the same tile keeps its colour on every unit it touches,"])
     lg.append(["so you can follow it from HBM/L2 to SMEM and finally into the tensor core."])
     lg.append(["A percentage in a cell means the unit is busy only that fraction of the cycle."])
+    lg.append([])
+    lg.append(["Abbreviations"])
+    for short, meaning in [
+        ("A", "activation tile (GEMM's A operand)"), ("B", "weight tile (GEMM's B operand, incl. expert weights)"),
+        ("Q", "query tile"), ("K", "key tile (KV cache)"), ("V", "value tile (KV cache)"),
+        ("KV", "combined/latent KV cache tile (MLA)"), ("S", "attention scores tile (Q @ K^T)"),
+        ("P", "attention probabilities tile (softmax(S), flash attention only)"),
+        ("MMA", "matrix-multiply-accumulate: one tensor-core tile instruction"),
+        ("GEMM_QK / GEMM_PV", "the two attention matmuls: scores = Q@K^T, output = P@V"),
+        ("SOFTMAX", "the softmax over one attention tile"), ("ST", "store: writing a result tile out"),
+    ]:
+        lg.append([short, meaning])
     lg.append([])
     stagger_rounds = max(0, tl["stages"] - 1)
     lg.append(["Stagger (load -> use)", f"{stagger_rounds} round(s)",

@@ -85,8 +85,8 @@ def test_excel_columns_are_grouped_by_unit(tmp_path):
     out = tmp_path / "t.xlsx"
     write_excel(steady_timeline(k, HW), str(out), "g", HW.name)
     ws = load_workbook(out)["timeline"]
-    assert [c.value for c in ws[1]][:5] == [None, None, None, None, "shader slice · cores"]
-    assert [c.value for c in ws[2]][:5] == ["cycle", "time_ns", "phase", "round", "tc"]
+    assert [c.value for c in ws[1]][:5] == [None, None, None, None, "memory · HBM"]
+    assert [c.value for c in ws[2]][:5] == ["cycle", "time_ns", "phase", "round", "ddr"]
     assert ws.cell(row=3, column=1).value == 0
     assert ws.freeze_panes == "E3"
 

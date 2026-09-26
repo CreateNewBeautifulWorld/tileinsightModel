@@ -261,26 +261,46 @@ async function validateHw(){
     ? `<span class="err">${j.problems.join("\n")}</span>` : `<span style="color:var(--ok)">config is valid (${j.fields} fields set)</span>`;
 }
 const WL_DEFAULTS={};
+// Shown directly: the most common attention shape (type/heads/Q·K·V dims), FFN shape (dim per
+// expert, expert count), and just the two dtypes that matter most (weights, KV cache).
+// Everything else (MLA-specific ranks, flash/causal/sliding-window details, topk/gating, the
+// other four per-tensor dtypes) still exists and still works, just tucked under "advanced" per
+// section so a first-time config isn't 30 fields deep.
+const WL_BASIC=new Set(["name","hidden","layers",
+  "attention.type","attention.heads","attention.head_dim","attention.v_head_dim",
+  "ffn.type","ffn.d_ff","ffn.experts",
+  "dtypes.weight","dtypes.kv",
+  "run.phase","run.batch","run.prefill_seq_len","run.cur_decoding_seq_len","run.max_seq_len"]);
 function buildWorkloadForm(){
   const secs={};
   SCHEMA.workload.forEach(f=>{ (secs[f.section]=secs[f.section]||[]).push(f); WL_DEFAULTS[f.path]=f.default; });
-  $("wlform").innerHTML = Object.entries(secs).map(([sec,fs])=>`
-    <div class="sec"><h2>${sec}</h2><div class="grid">` + fs.map(f=>{
-      const id="w_"+f.path.replace(/\./g,"__");
-      const opts={"attention.type":["mla","gqa","mha"],"attention.impl":["flash","naive"],
-        "attention.absorb":["auto","true","false"],"ffn.type":["moe","mlp","none"],
-        "run.phase":["decode","prefill"],
-        "dtypes.weight":["fp8","int4","nvfp4","fp4","int8","bf16","fp16"],
-        "dtypes.expert":["fp8","nvfp4","fp4","int4","int8","bf16"],
-        "dtypes.activation":["bf16","fp16","fp8"],"dtypes.kv":["bf16","fp8","fp16"],
-        "dtypes.compute":["fp8","nvfp4","fp4","int8","bf16","fp16","fp32"],
-        "dtypes.attn_compute":["bf16","fp16","fp8"]}[f.path];
-      const ctl = opts ? `<select id="${id}">${opts.map(o=>`<option${String(f.default)===o?" selected":""}>${o}</option>`).join("")}</select>`
-        : (f.kind==="bool" ? `<select id="${id}"><option${f.default?" selected":""}>true</option><option${!f.default?" selected":""}>false</option></select>`
-        : `<input id="${id}" ${f.kind==="int"?'type="number"':''} value="${f.default}">`);
-      return `<div><label>${esc(f.path.split(".").pop())}${f.unit?` (${esc(f.unit)})`:""}</label>${ctl}`
-        + `<div class="hint">${esc(f.doc)}</div></div>`;
-    }).join("") + `</div></div>`).join("");
+  const opts={"attention.type":["mla","gqa","mha"],"attention.impl":["flash","naive"],
+    "attention.absorb":["auto","true","false"],"ffn.type":["moe","mlp","none"],
+    "run.phase":["both","decode","prefill"],
+    "dtypes.weight":["fp8","int4","nvfp4","fp4","int8","bf16","fp16"],
+    "dtypes.expert":["fp8","nvfp4","fp4","int4","int8","bf16"],
+    "dtypes.activation":["bf16","fp16","fp8"],"dtypes.kv":["bf16","fp8","fp16"],
+    "dtypes.compute":["fp8","nvfp4","fp4","int8","bf16","fp16","fp32"],
+    "dtypes.attn_compute":["bf16","fp16","fp8"]};
+  function field(f){
+    const id="w_"+f.path.replace(/\./g,"__");
+    const o=opts[f.path];
+    // run.phase's model-layer default is "decode" (for the CLI's single-phase run_workload());
+    // the wizard's own default is "both", since that's what it actually runs unless you narrow it.
+    const dflt=f.path==="run.phase"?"both":f.default;
+    const ctl = o ? `<select id="${id}">${o.map(v=>`<option${String(dflt)===v?" selected":""}>${v}</option>`).join("")}</select>`
+      : (f.kind==="bool" ? `<select id="${id}"><option${f.default?" selected":""}>true</option><option${!f.default?" selected":""}>false</option></select>`
+      : `<input id="${id}" ${f.kind==="int"?'type="number"':''} value="${f.default}">`);
+    return `<div><label>${esc(f.path.split(".").pop())}${f.unit?` (${esc(f.unit)})`:""}</label>${ctl}`
+      + `<div class="hint">${esc(f.doc)}</div></div>`;
+  }
+  $("wlform").innerHTML = Object.entries(secs).map(([sec,fs])=>{
+    const basic=fs.filter(f=>WL_BASIC.has(f.path)), adv=fs.filter(f=>!WL_BASIC.has(f.path));
+    return `<div class="sec"><h2>${esc(sec)}</h2><div class="grid">${basic.map(field).join("")}</div>`
+      + (adv.length?`<details style="margin-top:10px"><summary>advanced (${adv.length})</summary>`
+          + `<div class="grid" style="margin-top:8px">${adv.map(field).join("")}</div></details>`:"")
+      + `</div>`;
+  }).join("");
 }
 function collectWorkload(){
   const wl={};
@@ -297,16 +317,18 @@ function collectWorkload(){
 }
 async function run(){
   go(4); $("log").textContent=""; $("fill").style.width="2%";
-  const cfg={gpuTilingPerfHWModel:GPU, workload:collectWorkload()};
+  const wl=collectWorkload();
+  const cfg={gpuTilingPerfHWModel:GPU, workload:wl};
   if($("cmpattn")?.checked) cfg.compare_attention=true;
   if(GPU_CONFIG_MODE==="slice") cfg.slice_cfg=collectSlice();
   else { const y=$("gpuTilingPerfHWModelYaml").value.trim(); if(y) cfg.gpuTilingPerfHWModelYaml=y; }
+  // phase "both" (default) runs prefill+decode together, one job, and the results page below
+  // shows both as tabs; picking "decode" or "prefill" instead runs just that one phase.
+  const mode = (wl.run && wl.run.phase==="both") ? "workload_both" : "workload";
   const t0=performance.now();
   try{
-    // prefill + decode together, one job — the results page below shows both as tabs, since
-    // comparing "processing the prompt" against "one token-generation step" is the point.
     const r=await fetch(API+"/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({mode:"workload_both",config:cfg})});
+      body:JSON.stringify({mode,config:cfg})});
     const {job_id}=await r.json(); JOB=job_id;
     let j;
     do{
@@ -322,6 +344,24 @@ async function run(){
     showResults(j.result,(performance.now()-t0)/1000); go(5);
   }catch(e){ $("log").innerHTML=`<span class="err">${e}</span>`; }
 }
+async function downloadFile(btn,url,filename){
+  // window.open(url) gives no feedback while the server is still generating a large trace file
+  // (the tab just sits blank) — fetch it instead so the button itself can show progress.
+  const label=btn.textContent;
+  btn.disabled=true; btn.textContent="Generating…";
+  try{
+    const r=await fetch(url);
+    if(!r.ok){ const e=await r.json().catch(()=>({error:r.statusText})); throw new Error(e.error||r.statusText); }
+    const blob=await r.blob();
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob); a.download=filename; a.click();
+    URL.revokeObjectURL(a.href);
+  }catch(e){
+    btn.textContent="failed: "+e.message; await new Promise(s=>setTimeout(s,2500));
+  }finally{
+    btn.disabled=false; btn.textContent=label;
+  }
+}
 function bars(list,total){ return list.map(x=>`<tr><td class="mono">${x.name}</td>
   <td class="num">${(100*x.share).toFixed(1)}%</td></tr>`).join(""); }
 
@@ -331,8 +371,11 @@ function bars(list,total){ return list.map(x=>`<tr><td class="mono">${x.name}</t
 const LANE_RGB={switch:"#6f8f6a",tc:"#b4552d",cuda:"#6b8f9c",sfu:"#8a6fb0",smem:"#5b9279",
   tmem:"#c2903a",l1:"#2f7d54",l2:"#4f7cac",ddr:"#b3563a",sram:"#7f9a52",net:"#7a7a7a"};
 function unitGroups(lanes){
-  const g={"shader slice · cores":[],"shader slice · L1/scratchpad":[],"shader slice · load paths":[],
-           "on-chip buffer":[],"memory · L2 ports":[],"memory · HBM":[]};
+  // memory-to-compute order (HBM -> L2 -> buffer -> load paths -> L1 -> cores) — a tile is
+  // loaded before an MMA consumes it; mirrors gpuTilingPerfHWModel/genResult/pdfreport.py's
+  // unit_groups() so the html view, the PDF and the Excel export all read the same way.
+  const g={"memory · HBM":[],"memory · L2 ports":[],"on-chip buffer":[],
+           "shader slice · load paths":[],"shader slice · L1/scratchpad":[],"shader slice · cores":[]};
   for(const l of lanes){
     if(["tc","cuda","sfu"].includes(l)) g["shader slice · cores"].push(l);
     else if(["smem","tmem","l1"].includes(l)) g["shader slice · L1/scratchpad"].push(l);
@@ -381,7 +424,10 @@ function updateGantt(){
 }
 
 let PHASE_RESULTS=null, CUR_PHASE="decode", LAST_SECS=0;
-function showResults(both,secs){
+function showResults(r,secs){
+  // mode "workload" (single phase) returns one flat result; mode "workload_both" returns
+  // {prefill:{...}, decode:{...}} already — normalize to the latter shape either way.
+  const both = ("step_ms" in r) ? {[r.workload?.run?.phase||"result"]: r} : r;
   PHASE_RESULTS=both; LAST_SECS=secs;
   CUR_PHASE=both.decode?"decode":Object.keys(both)[0];
   renderResultsShell();
@@ -406,10 +452,10 @@ function renderPhaseBody(r){
     <div class="kpi"><b>${r.bounds.by_resource[0]?.name||"—"}</b><span>top bound</span></div>
     <div class="kpi"><b>${secs.toFixed(1)} s</b><span>compute time</span></div></div>
   <div class="row" style="margin:0 0 14px">
-    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE)">trace Excel (per cycle, grouped by unit)</button>
-    <button class="ghost" onclick="window.open(API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE+'&full=1')">Excel · whole kernel</button>
-    <button class="ghost" onclick="window.open(API+'/api/csv?job='+JOB+'&phase='+CUR_PHASE)">CSV</button>
-    <button class="ghost" onclick="window.open(API+'/api/pdf?job='+JOB+'&phase='+CUR_PHASE)">PDF report</button>
+    <button class="ghost" onclick="downloadFile(this,API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE,'tilesight_cycles.xlsx')">trace Excel (per cycle, grouped by unit)</button>
+    <button class="ghost" onclick="downloadFile(this,API+'/api/xlsx?job='+JOB+'&phase='+CUR_PHASE+'&full=1','tilesight_cycles.xlsx')">Excel · whole kernel</button>
+    <button class="ghost" onclick="downloadFile(this,API+'/api/csv?job='+JOB+'&phase='+CUR_PHASE,'tilesight_cycles.csv')">CSV</button>
+    <button class="ghost" onclick="downloadFile(this,API+'/api/pdf?job='+JOB+'&phase='+CUR_PHASE,'tilesight_report.pdf')">PDF report</button>
   </div>
   ${r.by_block?`<div class="sec"><h2>the model's three blocks</h2>
     <div class="kpis">${Object.entries(r.by_block).map(([k,v])=>

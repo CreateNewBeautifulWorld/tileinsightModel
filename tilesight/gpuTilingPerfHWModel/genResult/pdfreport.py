@@ -85,10 +85,16 @@ class _Gantt(Flowable):
 
 
 def unit_groups(lanes: list[str]) -> dict[str, list[str]]:
-    """The three blocks of the model, with their units — the same split as the GPU config."""
-    g = {"shader slice · cores": [], "shader slice · L1/scratchpad": [],
-         "shader slice · load paths": [], "on-chip buffer": [],
-         "memory · L2 ports": [], "memory · HBM": []}
+    """The three blocks of the model, with their units — the same split as the GPU config.
+
+    Ordered memory-to-compute (HBM -> L2 -> on-chip buffer -> load paths -> L1/scratchpad ->
+    cores), i.e. the direction a tile actually travels: it is loaded before it is consumed by
+    an MMA, and every table/timeline built from this (Excel, the PDF Gantt, the html results
+    page) should read that way left-to-right / top-to-bottom.
+    """
+    g = {"memory · HBM": [], "memory · L2 ports": [], "on-chip buffer": [],
+         "shader slice · load paths": [], "shader slice · L1/scratchpad": [],
+         "shader slice · cores": []}
     for l in lanes:
         if l in ("tc", "cuda", "sfu"):
             g["shader slice · cores"].append(l)
