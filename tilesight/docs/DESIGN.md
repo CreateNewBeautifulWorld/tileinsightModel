@@ -156,14 +156,41 @@ path attribute decides. An L1 hit does not reach the L2 datapath: a 1024x1024x51
 the LSU path gets 37%/12% hit and its L2 traffic drops from 16 to 12 KB, while the same GEMM on
 TMA bypasses L1 entirely. There is an `l1` lane for its bandwidth.
 
-**The on-chip buffer is not a cache**: it is explicitly managed, so its residency is a
-deterministic capacity share per tensor class (`resident_frac`), never a probability.
+**The on-chip buffer's residency is decided one of two ways**, chosen by how its capacity is
+allocated. A *shared* buffer (`memory.sram.policy: cache`, no `alloc`/`pin` split) is a real cache
+that every tensor class competes for via actual access order, so `lower_gemm`/`lower_attention_*`
+give it the same tile-keyed LRU trace as L1/L2 — reusing the exact A/B (or K/V) access stream
+already built for the L2 simulation, run through `cache::simulate` a second time against
+`sram_capacity_for(class)`. This is the same reuse-distance idea the paper's SDCM approximates
+with a probability (see "why a simulation instead of the paper's probability formula" below),
+computed exactly instead, because we do have the real trace. A *pinned* buffer (`memory.sram.alloc` or `.pin`, e.g. `{weight: 1.0}`) models
+a dedicated, pre-staged carve-out instead — assumed already resident before this kernel's own
+accesses run, not something its access order fills from cold — so it keeps the closed-form
+`resident_frac` (capacity/footprint ratio): charging the trace's compulsory first-touch misses
+against a pinned share would wrongly treat pre-loaded weights as starting from an empty cache.
+See `tests/test_paths_addr_buffer.py::
+test_shared_buffer_uses_a_real_lru_trace_pinned_buffer_stays_closed_form`.
 
 The paper's probabilistic SDCM model (§3.5, Eqs. 6–10: reuse-distance -> hit probability via a
 binomial/Gaussian approximation) answered a different, weaker question ("how likely is a hit")
 and was dropped from the port — it was dead code even before this rewrite (nothing in the real
 simulation path called it, only its own tests did); the deterministic tile-level simulation
 above is what every lowering actually uses.
+
+**Why a simulation instead of the paper's probability formula, precisely.** The paper's Eq. 6
+computes a tile's reuse distance `D_T` (distinct tile-blocks touched since its last access) —
+that step is exact, a plain count over a trace. Eqs. 7–10 then turn `D_T` into a hit *probability*
+via a binomial/Gaussian approximation, because the paper doesn't necessarily know which cache
+*set* each of those `D_T` tiles actually mapped to, so it assumes uniform-random placement across
+`B_T` sets and asks "what's the chance ≥`A` of them collided with mine". We are not in that
+position: every access's real address is generated from the tile geometry, so `AddrCfg`/`port_of`
+already gives the exact set/partition for every access. With that, there's nothing left to
+estimate — `cache_sim.cpp`'s per-partition LRU directly computes whether enough same-set tiles
+really did land within the reuse window, which is the deterministic answer Eqs. 7–10 exist to
+approximate when the real mapping isn't known. The one approximation that *does* remain here is
+unrelated to probability: `keys`/`addrs`/`sizes` are built from a **sampled window** of the full
+iteration space (`ksteps = min(iters, 4)`, waves capped by `memory.l2.waves_simulated`), not the
+whole trace, for tile-search performance — a coverage limit, not a statistical model.
 
 **L2/DDR bandwidth is not one GPU-wide pool.** §2's `l2`/`ddr` lanes model the *configured
 aggregate* bandwidth, fair-shared across active cores (`shader_core::per_core_rate`) — but

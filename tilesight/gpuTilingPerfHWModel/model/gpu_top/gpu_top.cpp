@@ -373,6 +373,32 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     }
   }
 
+  // A real tile-keyed LRU trace of the buffer, exactly like the L1 one above and simulate_l2
+  // itself: the buffer is explicitly managed, but which tile occupies it right now is still a
+  // deterministic question given the real access order and a real capacity, not something a
+  // closed-form ratio should have to approximate. Reuses the very same A/B access stream already
+  // built for the L2 simulation, filtered to one operand's own accesses, against that operand's
+  // own class capacity. Only applies to a *shared* buffer, where tiles genuinely compete for space
+  // via real access order (memory.sram.alloc/pin unset): a static per-class share (alloc/pin) means
+  // that capacity is a dedicated, pre-staged carve-out, not something this kernel's own access
+  // order fills from cold — charging this simulation's compulsory first-touch misses against it
+  // would be wrong, so that case keeps the closed-form resident_frac. Also falls back there when
+  // the class has no buffer capacity to simulate at all.
+  bool sram_is_static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
+  auto buf_miss = [&](const std::string& klass, int stream) -> std::optional<double> {
+    double cap = hw.sram_capacity_for(klass);
+    if (cap <= 0 || sram_is_static_alloc) return std::nullopt;
+    std::vector<int64_t> sk_, sa_;
+    std::vector<double> ss_;
+    std::vector<int> st_;
+    for (size_t i = 0; i < keys.size(); ++i)
+      if (streams[i] == stream) { sk_.push_back(keys[i]); sa_.push_back(addrs[i]); ss_.push_back(sizes[i]); st_.push_back(0); }
+    if (sk_.empty()) return std::nullopt;
+    std::vector<int> part1(sa_.size(), 0);
+    cache::SimResult r = cache::simulate(sk_, sa_, ss_, st_, 1, cap, 1, part1, hw.get_str("memory.sram.policy", "lru"));
+    return r.miss_fraction()[0];
+  };
+
   bool has_sram = hw.has_sram();
   bool has_sa = false, has_sb = false;
   double sa = 0, sb = 0;
@@ -382,10 +408,12 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     // A/B matrix. Reuse across several M/N-tiles from that one resident copy is share_a/share_b's
     // job (an already-computed, searched staging factor) applied separately below — it says how
     // many times a resident tile gets reused, not how big the resident footprint is.
+    auto ra_miss = buf_miss(tensor_class(an), 0);
+    auto rb_miss = buf_miss(tensor_class(bn_), 1);
     double a_active = static_cast<double>(stages) * a_tile * static_cast<double>(concurrent_blocks);
     double b_active = static_cast<double>(stages) * b_tile * static_cast<double>(concurrent_blocks);
-    double ra = resident_frac(hw, a_active, tensor_class(an));
-    double rb_ = resident_frac(hw, b_active, tensor_class(bn_));
+    double ra = ra_miss ? (1.0 - *ra_miss) : resident_frac(hw, a_active, tensor_class(an));
+    double rb_ = rb_miss ? (1.0 - *rb_miss) : resident_frac(hw, b_active, tensor_class(bn_));
     sa = fa * (1 - ra) / share_a;
     sb = fb * (1 - rb_) / share_b;
     has_sa = has_sb = true;
@@ -603,13 +631,28 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
   bool has_fs = false;
   double fs = 0.0;
   if (hw.has_sram()) {
-    // The buffer isn't a cache and doesn't hold the whole layer's KV at once — it's a
-    // deterministic capacity share of whatever's actively streaming through the pipeline right
-    // now: `stages`-deep multi-buffering x one tile's K/V bytes x however many blocks are
-    // concurrently resident GPU-wide. Comparing that (not B*kv_heads*S, the entire sequence)
-    // against sram_capacity_for("kv") is what "only the part currently needed" means.
-    double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
-    fs = f * (1 - resident_frac(hw, kv_active, "kv"));
+    bool sram_is_static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
+    double cap = hw.sram_capacity_for("kv");
+    std::optional<double> kv_miss;
+    if (cap > 0 && !sram_is_static_alloc && !keys.empty()) {
+      // Same real tile-keyed LRU trace as lower_gemm's buf_miss, over the same combined K+V
+      // access stream already built for the L2 simulation above.
+      std::vector<int> part1(addrs.size(), 0);
+      cache::SimResult r = cache::simulate(keys, addrs, sizes, streams, 1, cap, 1, part1,
+                                           hw.get_str("memory.sram.policy", "lru"));
+      kv_miss = r.miss_fraction()[0];
+    }
+    if (kv_miss) {
+      fs = f * (*kv_miss);
+    } else {
+      // The buffer isn't a cache and doesn't hold the whole layer's KV at once — it's a
+      // deterministic capacity share of whatever's actively streaming through the pipeline right
+      // now: `stages`-deep multi-buffering x one tile's K/V bytes x however many blocks are
+      // concurrently resident GPU-wide. Comparing that (not B*kv_heads*S, the entire sequence)
+      // against sram_capacity_for("kv") is what "only the part currently needed" means.
+      double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
+      fs = f * (1 - resident_frac(hw, kv_active, "kv"));
+    }
     has_fs = true;
   }
 
@@ -772,11 +815,26 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   bool has_fs = false;
   double fs = 0.0;
   if (hw.has_sram()) {
-    // Same reasoning as lower_attention_decode: the buffer holds whatever's actively streaming
-    // right now (stages-deep x one K/V tile x concurrently-resident blocks), not the whole
-    // sequence's KV.
-    double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
-    fs = f * (1 - resident_frac(hw, kv_active, "kv"));
+    bool sram_is_static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
+    double cap = hw.sram_capacity_for("kv");
+    std::optional<double> kv_miss;
+    if (cap > 0 && !sram_is_static_alloc && !keys.empty()) {
+      // Same real tile-keyed LRU trace as lower_gemm's buf_miss, over the same combined K+V
+      // access stream already built for the L2 simulation above.
+      std::vector<int> part1(addrs.size(), 0);
+      cache::SimResult r = cache::simulate(keys, addrs, sizes, streams, 1, cap, 1, part1,
+                                           hw.get_str("memory.sram.policy", "lru"));
+      kv_miss = r.miss_fraction()[0];
+    }
+    if (kv_miss) {
+      fs = f * (*kv_miss);
+    } else {
+      // Same reasoning as lower_attention_decode: the buffer holds whatever's actively streaming
+      // right now (stages-deep x one K/V tile x concurrently-resident blocks), not the whole
+      // sequence's KV.
+      double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
+      fs = f * (1 - resident_frac(hw, kv_active, "kv"));
+    }
     has_fs = true;
   }
 

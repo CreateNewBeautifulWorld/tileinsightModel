@@ -85,6 +85,41 @@ def test_l2_vs_buffer_trade_needs_a_big_buffer():
     assert rows[-1]["top_bound"].startswith("l2")
 
 
+def test_shared_buffer_uses_a_real_lru_trace_pinned_buffer_stays_closed_form():
+    """A *shared* buffer (policy=cache, no alloc/pin split) is a real cache tiles compete for via
+    the actual access order — so its residency comes from the same tile-keyed LRU trace as L1/L2
+    (`cache::simulate` over the exact A/B access stream already built for the L2 simulation),
+    not a closed-form capacity/footprint ratio: a tile's presence is decided by whether it was
+    really touched recently enough to still be resident, exactly like the paper's reuse-distance
+    D_T but computed exactly (real addresses, real order) instead of approximated by a binomial.
+
+    A *pinned* buffer (an explicit memory.sram.alloc/pin split) models a dedicated, pre-staged
+    carve-out instead — weights assumed already resident before this kernel's own accesses, not
+    something filled from cold by them — so it deliberately keeps the closed-form resident_frac:
+    charging this simulation's compulsory first-touch misses against a pinned share would be
+    wrong. This is what test_l2_vs_buffer_trade_needs_a_big_buffer and
+    test_buffer_sits_between_the_slices_and_l2_behind_a_switch already rely on."""
+    tile = TileConfig(bm=64, bn=256, bk=64)
+
+    def ddr_of(cur_gpu_config):
+        k = _lower_gemm(cur_gpu_config, 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8",
+                        compute_dtype="fp8", tile=tile)[0]
+        return sum(a.work.get("ddr", 0) for a in k.trace.body)
+
+    # Shared cache: real trace, so more capacity can only ever help (never worse), same
+    # monotonicity CLAUDE.md already requires of every other bandwidth/capacity knob.
+    small = ddr_of(with_buffer(HW, 1, policy="cache"))
+    big = ddr_of(with_buffer(HW, 256, policy="cache"))
+    plain = ddr_of(HW.override({"memory.sram": None}) if False else HW)
+    assert big <= small <= plain
+
+    # Pinned 100% to weight with ample capacity: still the old closed-form full-residency case
+    # (zero leftover DDR for that operand), unaffected by the shared-buffer trace above.
+    pinned = with_buffer(HW, 64 * 1024, policy="pin", pin={"weight": 1.0})
+    k = _lower_gemm(pinned, 4096, 4096, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=tile)[0]
+    assert k.trace.body[1].work["ddr"] == 0  # body[1] = load:weight (b_name defaults to "weight")
+
+
 def test_every_unit_has_a_configurable_latency():
     # defaults are in cycles and convert with the clock
     assert abs(HW.unit_latency_s("tc") * HW.clock_hz - 64) < 1e-6      # one tile MMA
