@@ -267,7 +267,7 @@ const WL_DEFAULTS={};
 // other four per-tensor dtypes) still exists and still works, just tucked under "advanced" per
 // section so a first-time config isn't 30 fields deep.
 const WL_BASIC=new Set(["name","hidden","layers",
-  "attention.type","attention.heads","attention.head_dim","attention.v_head_dim",
+  "attention.type","attention.impl","attention.heads","attention.head_dim","attention.v_head_dim",
   "ffn.type","ffn.d_ff","ffn.experts",
   "dtypes.weight","dtypes.kv",
   "run.phase","run.batch","run.prefill_seq_len","run.cur_decoding_seq_len","run.max_seq_len"]);
