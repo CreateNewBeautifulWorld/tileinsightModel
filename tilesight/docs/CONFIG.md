@@ -189,7 +189,7 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 | field | type | unit | default | tag | meaning |
 |---|---|---|---|---|---|
 | `memory.outstanding.per_sm_lines` | int | lines | `0` | calib | Cache lines in flight per SM (MSHR-style). Little's law: BW_per_SM <= lines x line / latency. 0 = unlimited |
-| `memory.outstanding.dma_per_engine_lines` | int | lines | `0` | calib | In-flight lines per DMA engine (recorded; not yet a cap) |
+| `memory.outstanding.dma_per_engine_lines` | int | lines | `0` | calib | In-flight hugepage fetches per DMA engine (0 = no cap). With memory.dma.hugepage_KB also set, caps DDR bandwidth via Little's law: engines x this x hugepage_bytes / DDR latency (HardwareSpec.dma_engine_limited_rate) -- the discrete-transfer analogue of outstanding_cap's generic per-SM cache-line limit |
 | `memory.queueing.coef` | float | — | `0.0` | loss | M/D/1-style latency inflation 1 + coef*u/(1-u) as a lane saturates. DEFAULT 0 = no loss |
 | `memory.queueing.max_factor` | float | — | `3.0` | loss | Cap on that inflation |
 
@@ -197,8 +197,8 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 
 | field | type | unit | default | tag | meaning |
 |---|---|---|---|---|---|
-| `memory.dma.engines` | int | count | `1` | spec | Copy engines |
-| `memory.dma.per_l2_block` | bool | — | `False` | spec | One engine per L2 block (false = a single shared engine) |
+| `memory.dma.engines` | int | count | `1` | spec | Copy engines. Feeds dma_engine_limited_rate's concurrency cap (with hugepage_KB and outstanding.dma_per_engine_lines also set); ignored when per_l2_block is true |
+| `memory.dma.per_l2_block` | bool | — | `False` | spec | One engine per L2 block/memory slice (memory.addressing.l2.ports) instead of the flat memory.dma.engines count, for dma_engine_limited_rate's concurrency cap |
 | `memory.dma.destination` | str | — | `smem` | policy | Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass |
 | `memory.dma.hugepage_KB` | float | KB | `0` | calib | Fixed size of one DMA operation: a DMA moves exactly one hugepage, never less (0 = unset: fall back to an occupancy proxy for L2/DDR slice spread; NVIDIA DMA/TMA moves 2048). Splits evenly across every memory slice by construction; if it doesn't divide evenly by memory.addressing.l2's granularity x port count (e.g. 2048 over 12 ports), it is padded up to what the fullest slice would get, never rejected or underestimated. Also changes the L2 simulation's cache atom (for GEMM A/B and attention K/V) to hugepage granularity, so real reuse across loop iterations shows up as a hit instead of a fresh miss every call |
 

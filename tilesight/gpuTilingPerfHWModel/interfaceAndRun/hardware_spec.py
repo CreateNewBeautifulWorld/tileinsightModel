@@ -387,6 +387,28 @@ class HardwareSpec:
             return min(configured, blocks * ports * bpc * self.clock_hz)
         return configured
 
+    def dma_engine_limited_rate(self, configured: float) -> float:
+        """Cap DDR bandwidth by how many DMA engines can have a hugepage fetch in flight at once.
+
+        Little's law again, like `outstanding_cap`, but for the discrete unit a configured
+        `memory.dma.hugepage_KB` actually moves per operation, instead of a generic cache line:
+        `engines x memory.outstanding.dma_per_engine_lines x hugepage_bytes / DDR round-trip
+        latency`. `memory.dma.per_l2_block` swaps the flat engine count for one engine per memory
+        slice (`memory.addressing.l2.ports`, falling back to `memory.l2.slices`). Returns
+        `configured` unchanged when no hugepage is configured (nothing discrete to count "in
+        flight" of — the generic per-SM `outstanding_cap` already covers that case) or either
+        knob is left at its default zero, so this is opt-in and changes no existing preset."""
+        hp = float(self.get("memory.dma.hugepage_KB") or 0) * 1024
+        lines = float(self.get("memory.outstanding.dma_per_engine_lines") or 0)
+        if hp <= 0 or lines <= 0:
+            return configured
+        engines = float(self.get("memory.addressing.l2.ports") or self.get("memory.l2.slices") or 1) \
+            if bool(self.get("memory.dma.per_l2_block")) else float(self.get("memory.dma.engines") or 1)
+        lat = self.unit_latency_s("ddr")
+        if engines <= 0 or lat <= 0:
+            return configured
+        return min(configured, engines * lines * hp / lat)
+
     def outstanding_cap(self, level: str) -> float:
         """Little's law: one SM cannot pull more than in-flight bytes / latency.
 
@@ -425,6 +447,7 @@ class HardwareSpec:
             # no L2 level: the lane is just the memory-slice ports, so it must not throttle
             # traffic that now goes straight to HBM (which pays the HBM latency instead)
             rate = max(self.block_limited_rate("l2", ddr_rate), ddr_rate)
+            rate = self.dma_engine_limited_rate(rate)
         else:
             rate = self.block_limited_rate("l2", l2["bandwidth_TBps"] * 1e12 * self.eff("l2"))
         out.append(Lane("l2", True, rate, min(cap, self.outstanding_cap("l2")), "memory", "global"))
@@ -441,9 +464,9 @@ class HardwareSpec:
                                 self.get("memory.l1.cluster_size", 1))),
                             "onchip_buffer", "global"))
         ddr = self.get("memory.ddr")
-        out.append(Lane("ddr", True,
-                        self.block_limited_rate("ddr", ddr["bandwidth_TBps"] * 1e12 * self.eff("ddr")),
-                        min(cap, self.outstanding_cap("ddr")), "memory", "global"))
+        ddr_final_rate = self.dma_engine_limited_rate(
+            self.block_limited_rate("ddr", ddr["bandwidth_TBps"] * 1e12 * self.eff("ddr")))
+        out.append(Lane("ddr", True, ddr_final_rate, min(cap, self.outstanding_cap("ddr")), "memory", "global"))
         return out
 
     def __repr__(self) -> str:

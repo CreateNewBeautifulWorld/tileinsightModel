@@ -253,12 +253,25 @@ the source, because reuse across iterations is now a real, simulated hit rather 
 billing formula has to guess at after the fact. See
 `tests/test_paths_addr_buffer.py::test_dma_hugepage_keys_the_l2_simulation_instead_of_rounding_after_the_fact`.
 
-**Still deliberately out of scope**: the same whole-hugepage granularity for on-chip buffer
-residency (`resident_frac`, `on_chip_buffer::resident_frac`) — a buffer that must hold a complete
-hugepage rather than a continuous capacity fraction; and Z-order/blocked tile addressing (so a 2-D
-tile's bytes are contiguous for hugepage-alignment purposes, unlike a plain row-major layout,
-`common/cache/address_map`). Both are natural follow-ons but touch more shared, tested machinery
-and deserve their own change.
+The shared on-chip buffer's residency (§4's "on-chip buffer's residency" above) uses this same
+hugepage-keyed trace now too, not just L2/gload. **Still deliberately out of scope**: Z-order/
+blocked tile addressing, so a 2-D tile's bytes are contiguous for hugepage-alignment purposes
+instead of the plain row-major layout `common/cache/address_map` assumes today.
+
+**DMA engine concurrency (`memory.dma.engines` / `.per_l2_block` /
+`memory.outstanding.dma_per_engine_lines`).** These three fields existed in the schema but were
+pure dead config — `dma_per_engine_lines` was even commented "recorded; not yet a cap". With a
+hugepage configured, a DMA moves one discrete unit per operation, which makes "how many can be in
+flight at once" a real, countable concurrency question for the first time — the same Little's-law
+shape `HardwareSpec.outstanding_cap` already uses for generic per-SM cache lines, just for DMA
+engines instead: `HardwareSpec.dma_engine_limited_rate(configured) = min(configured, engines ×
+dma_per_engine_lines × hugepage_bytes / DDR latency)`. `per_l2_block` swaps the flat `engines`
+count for one engine per memory slice (`memory.addressing.l2.ports`). This caps the `ddr` lane's
+`total_rate` in `HardwareSpec.lanes()` directly — no C++ engine changes needed, since lanes are
+already GPU-config data the round-time formula consumes generically. Both knobs default to 0
+(`dma_per_engine_lines`) so this changes no existing preset's behavior unless explicitly
+calibrated in. See
+`tests/test_paths_addr_buffer.py::test_dma_engines_cap_ddr_bandwidth_when_hugepages_are_discrete`.
 
 ## 5. Kernel lowerings
 ### 5.1 GEMM (`model/gpu_top/gpu_top.cpp`, `lower_gemm`)

@@ -259,15 +259,21 @@ FIELDS: tuple[Field, ...] = (
       "Cache lines in flight per SM (MSHR-style). Little's law: BW_per_SM <= lines x line / latency. "
       "0 = unlimited"),
     F("memory.outstanding.dma_per_engine_lines", "int", "lines", 0, "calib", "memory.parallelism",
-      "In-flight lines per DMA engine (recorded; not yet a cap)"),
+      "In-flight hugepage fetches per DMA engine (0 = no cap). With memory.dma.hugepage_KB also "
+      "set, caps DDR bandwidth via Little's law: engines x this x hugepage_bytes / DDR latency "
+      "(HardwareSpec.dma_engine_limited_rate) -- the discrete-transfer analogue of "
+      "outstanding_cap's generic per-SM cache-line limit"),
     F("memory.queueing.coef", "float", "", 0.0, "loss", "memory.parallelism",
       "M/D/1-style latency inflation 1 + coef*u/(1-u) as a lane saturates. DEFAULT 0 = no loss"),
     F("memory.queueing.max_factor", "float", "", 3.0, "loss", "memory.parallelism", "Cap on that inflation"),
 
     # ---------------------------------------------------------------- DMA
-    F("memory.dma.engines", "int", "count", 1, "spec", "memory.dma", "Copy engines"),
+    F("memory.dma.engines", "int", "count", 1, "spec", "memory.dma",
+      "Copy engines. Feeds dma_engine_limited_rate's concurrency cap (with hugepage_KB and "
+      "outstanding.dma_per_engine_lines also set); ignored when per_l2_block is true"),
     F("memory.dma.per_l2_block", "bool", "", False, "spec", "memory.dma",
-      "One engine per L2 block (false = a single shared engine)"),
+      "One engine per L2 block/memory slice (memory.addressing.l2.ports) instead of the flat "
+      "memory.dma.engines count, for dma_engine_limited_rate's concurrency cap"),
     F("memory.dma.destination", "str", "", "smem", "policy", "memory.dma",
       "Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass"),
     F("memory.dma.hugepage_KB", "float", "KB", 0, "calib", "memory.dma",
