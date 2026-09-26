@@ -507,8 +507,14 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
   bool has_fs = false;
   double fs = 0.0;
   if (hw.has_sram()) {
-    double kv_total = B * kv_heads * S * (d_qk + (v_in_k ? 0 : d_v)) * kvb;
-    fs = f * (1 - resident_frac(hw, kv_total, "kv"));
+    // The buffer isn't a cache and doesn't hold the whole layer's KV at once — it's a
+    // deterministic capacity share of whatever's actively streaming through the pipeline right
+    // now: `stages`-deep multi-buffering x one tile's K/V bytes x however many blocks are
+    // concurrently resident GPU-wide. Comparing that (not B*kv_heads*S, the entire sequence)
+    // against sram_capacity_for("kv") is what "only the part currently needed" means.
+    int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
+    double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
+    fs = f * (1 - resident_frac(hw, kv_active, "kv"));
     has_fs = true;
   }
 
@@ -657,8 +663,12 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   bool has_fs = false;
   double fs = 0.0;
   if (hw.has_sram()) {
-    double kv_total = B * kv_heads * S * (d_qk + d_v) * kvb;
-    fs = f * (1 - resident_frac(hw, kv_total, "kv"));
+    // Same reasoning as lower_attention_decode: the buffer holds whatever's actively streaming
+    // right now (stages-deep x one K/V tile x concurrently-resident blocks), not the whole
+    // sequence's KV.
+    int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
+    double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
+    fs = f * (1 - resident_frac(hw, kv_active, "kv"));
     has_fs = true;
   }
 
