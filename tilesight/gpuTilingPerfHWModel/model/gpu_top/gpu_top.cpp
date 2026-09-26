@@ -418,7 +418,13 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   int64_t blocks = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(std::max(bytes_in, bytes_out) / chunk)));
   double per = 1.0 / blocks;
   bool oc = on_chip.has_value() ? *on_chip : hw.sram_keeps_intermediates();
-  double res = oc ? resident_frac(hw, std::max(bytes_in, bytes_out), "act") : 0.0;
+  // Same fix as GEMM/attention: an elementwise op streams each chunk once (no reuse), so the
+  // buffer only ever holds the chunks concurrently in flight right now, not the whole tensor.
+  // resident=8 is the fixed occupancy this lowering uses below (no real occupancy() call here).
+  const int64_t elementwise_resident = 8;
+  int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * elementwise_resident);
+  double active_bytes = std::max(bytes_in, bytes_out) * per * static_cast<double>(concurrent_blocks);
+  double res = oc ? resident_frac(hw, active_bytes, "act") : 0.0;
   std::vector<TraceAction> body;
   body.push_back(gload(hw, "load:" + in_name, bytes_in * per, 1.0, "lsu", {}, true, 1.0 - res, false, 0.0));
   TraceAction comp;
@@ -436,7 +442,7 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   k.num_blocks = blocks;
   k.iters = 1;
   k.stages = 1;
-  k.resident = 8;
+  k.resident = elementwise_resident;
   k.body = body;
   nb::dict meta;
   meta["bytes"] = bytes_in + bytes_out;
