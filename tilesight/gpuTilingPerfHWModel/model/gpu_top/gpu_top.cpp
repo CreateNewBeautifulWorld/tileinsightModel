@@ -117,10 +117,10 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
       work["smem"] = (work.count("smem") ? work["smem"] : 0.0) + hw.smem_time_per_sm(nbytes * frac);
   }
   work["l2"] = std::max(0.0, work["l2"]);
-  if (slice_frac < 1.0) {
-    work["l2"] /= slice_frac;
-    work["ddr"] /= slice_frac;
-  }
+  // Only the DDR leg is DMA-mediated (a genuine HBM fetch, hugepage/slice quantized); the L2 leg
+  // is the L2 port's own bandwidth, serving every access whether it hits or misses, and is never
+  // hugepage-quantized.
+  if (slice_frac < 1.0) work["ddr"] /= slice_frac;
 
   double buf_lat = has_sram ? hw.sram_latency_ns() * 1e-9 : 0.0;
   bool has_l2 = hw.l2_capacity_bytes() > 0;
@@ -143,10 +143,7 @@ TraceAction gstore(const std::string& name, double nbytes, const std::vector<int
   a.name = name;
   a.work["l2"] = nbytes;
   a.work["ddr"] = nbytes * ddr_frac;
-  if (slice_frac < 1.0) {
-    a.work["l2"] /= slice_frac;
-    a.work["ddr"] /= slice_frac;
-  }
+  if (slice_frac < 1.0) a.work["ddr"] /= slice_frac;
   if (sram_frac != 0.0) a.work["sram"] = nbytes * sram_frac;
   a.deps = deps;
   return a;
