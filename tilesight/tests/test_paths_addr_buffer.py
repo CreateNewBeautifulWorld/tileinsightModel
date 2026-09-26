@@ -208,6 +208,35 @@ def test_l2_blocks_and_outstanding_limits_are_enforced():
     assert a > b
 
 
+def test_l2_ddr_bandwidth_is_capped_by_memory_slices():
+    """L2 and DDR are not one GPU-wide pool: each memory slice owns its own L2 port and HBM
+    channel (memory.addressing.l2.ports), and every tile's address routes to exactly one slice.
+    A kernel only reaches the full configured aggregate bandwidth if it keeps at least as many
+    blocks concurrently in flight as there are slices; fewer concurrent blocks touch fewer
+    slices and reach proportionally less bandwidth, with the per-byte address routing unchanged."""
+    t = TileConfig(bm=128, bn=128, bk=64)
+
+    def kernel(n_ports):
+        hw = HW.override({"memory.addressing.l2": {"ports": n_ports, "mode": "interleave",
+                                                    "granularity_KB": 1}})
+        k = _lower_gemm(hw, 512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
+        return hw, k
+
+    hw16, k16 = kernel(16)
+    hw64, k64 = kernel(64)
+    assert k16.meta["resident"] == 1
+    concurrent_blocks = 16  # mt=nt=4, batch=1, resident=1 -> min(16, sms*1) == 16
+    ddr16 = k16.trace.body[0].work["ddr"]
+    ddr64 = k64.trace.body[0].work["ddr"]
+    # 16 slices, 16 concurrent blocks -> every slice reached, no derating.
+    # 64 slices, still only 16 concurrent blocks -> only 1/4 of the slices reached.
+    assert ddr16 == pytest.approx(ddr64 * concurrent_blocks / 64)
+    assert evaluate(k64, hw64).time_s > evaluate(k16, hw16).time_s
+    # Enough concurrent blocks to cover the slices restores full bandwidth (no further penalty).
+    hw_wide, k_wide = kernel(concurrent_blocks)  # ports == concurrent_blocks: fully saturated
+    assert k_wide.trace.body[0].work["ddr"] == pytest.approx(ddr16)
+
+
 def test_dma_destination_changes_which_lanes_are_used():
     to_smem, to_l2, bypass = (_k(HW.override({"memory.dma.destination": d}))
                               for d in ("smem", "l2", "bypass"))

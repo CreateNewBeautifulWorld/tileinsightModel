@@ -76,7 +76,8 @@ cache::AddrCfg l2_addr_cfg(const HwView& hw) {
 // Mirrors kernels/gemm.py `gload`.
 TraceAction gload(const HwView& hw, const std::string& name, double nbytes, double miss,
                   const std::string& load_path, const std::vector<int>& deps,
-                  bool has_sram_miss, double sram_miss, bool has_l1_miss, double l1_miss) {
+                  bool has_sram_miss, double sram_miss, bool has_l1_miss, double l1_miss,
+                  double slice_frac = 1.0) {
   double l1_m = 1.0;
   std::map<std::string, double> work;
   if (has_l1_miss && hw.l1_capacity_bytes() > 0) {
@@ -115,6 +116,10 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
       work["smem"] = (work.count("smem") ? work["smem"] : 0.0) + hw.smem_time_per_sm(nbytes * frac);
   }
   work["l2"] = std::max(0.0, work["l2"]);
+  if (slice_frac < 1.0) {
+    work["l2"] /= slice_frac;
+    work["ddr"] /= slice_frac;
+  }
 
   double buf_lat = has_sram ? hw.sram_latency_ns() * 1e-9 : 0.0;
   bool has_l2 = hw.l2_capacity_bytes() > 0;
@@ -132,11 +137,15 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
 }
 
 TraceAction gstore(const std::string& name, double nbytes, const std::vector<int>& deps, double ddr_frac,
-                   double sram_frac) {
+                   double sram_frac, double slice_frac = 1.0) {
   TraceAction a;
   a.name = name;
   a.work["l2"] = nbytes;
   a.work["ddr"] = nbytes * ddr_frac;
+  if (slice_frac < 1.0) {
+    a.work["l2"] /= slice_frac;
+    a.work["ddr"] /= slice_frac;
+  }
   if (sram_frac != 0.0) a.work["sram"] = nbytes * sram_frac;
   a.deps = deps;
   return a;
@@ -159,6 +168,20 @@ double resident_frac(const HwView& hw, double footprint_bytes, const std::string
   double fp_override = has_override ? nb::cast<double>(o) : 0.0;
   double cap = hw.sram_capacity_for(klass);
   return on_chip_buffer::resident_frac(true, has_override, fp_override, cap, footprint_bytes);
+}
+
+// L2 and DDR are not one GPU-wide pool: each memory slice owns its own L2 port and HBM channel,
+// and a tile's address (see l2_addr_cfg/AddrCfg above) routes it to exactly one slice. A kernel
+// can only draw the *aggregate* configured L2/DDR bandwidth when it keeps enough independent
+// blocks in flight to spread traffic over every slice; with fewer concurrently-active blocks than
+// slices, only that many slices' worth of bandwidth is actually reachable. This is deliberately
+// computed from occupancy (concurrently-resident blocks vs. slice count), not from the synthetic
+// per-tile address stream the L2 hit/miss simulation builds: that stream is tuned for cache
+// behavior and aliases badly (power-of-two tile strides vs. interleave granularity) if reused to
+// judge bandwidth spread.
+double slice_bw_frac(int64_t concurrent_blocks, int n_slices) {
+  if (n_slices <= 1 || concurrent_blocks <= 0) return 1.0;
+  return std::min(1.0, static_cast<double>(concurrent_blocks) / static_cast<double>(n_slices));
 }
 
 }  // namespace
@@ -226,6 +249,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   if (resident < 1) return std::nullopt;
   auto [rpt, spill] = reg_estimate(hw, static_cast<int64_t>(acc), threads - 128);
   int64_t blocks = batch * mt * nt * sk;
+  int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
 
   double share_a = 1.0, share_b = 1.0;
   bool has_stage_cfg = hw.has_sram() && !hw.get("memory.sram.stage").is_none();
@@ -269,6 +293,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     }
   }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
+  double slice_frac = slice_bw_frac(concurrent_blocks, lmap.ports);
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   std::string policy = hw.get_str("memory.l2.policy", "lru");
   bool through_l1 = false;
@@ -317,7 +342,6 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     // A/B matrix. Reuse across several M/N-tiles from that one resident copy is share_a/share_b's
     // job (an already-computed, searched staging factor) applied separately below — it says how
     // many times a resident tile gets reused, not how big the resident footprint is.
-    int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
     double a_active = static_cast<double>(stages) * a_tile * static_cast<double>(concurrent_blocks);
     double b_active = static_cast<double>(stages) * b_tile * static_cast<double>(concurrent_blocks);
     double ra = resident_frac(hw, a_active, tensor_class(an));
@@ -331,8 +355,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   auto [mma_lane, mma_t] = hw.mma_cost(2.0 * bm_c * t.bn * t.bk, comp_dt);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a));
-  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b));
+  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a, slice_frac));
+  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b, slice_frac));
   {
     TraceAction mma;
     mma.name = "mma";
@@ -345,7 +369,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   if (spill) {
     TraceAction sp;
     sp.name = "spill:regs";
-    sp.work["l2"] = 2.0 * spill / std::max<int64_t>(1, iters);
+    sp.work["l2"] = 2.0 * spill / std::max<int64_t>(1, iters) / slice_frac;
     sp.deps = {2};
     body.push_back(sp);
   }
@@ -358,7 +382,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     acc_a.work["cuda"] = hw.cuda_time_per_sm(2.0 * t.bm * t.bn);
     acc_a.latency = hw.unit_latency_s(hw.has_tmem() ? "tmem" : "cuda");
     epilogue.push_back(acc_a);
-    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0));
+    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0, slice_frac));
   }
 
   double useful = 2.0 * M * N * K * batch;
@@ -425,8 +449,9 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * elementwise_resident);
   double active_bytes = std::max(bytes_in, bytes_out) * per * static_cast<double>(concurrent_blocks);
   double res = oc ? resident_frac(hw, active_bytes, "act") : 0.0;
+  double slice_frac = slice_bw_frac(concurrent_blocks, l2_addr_cfg(hw).ports);
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:" + in_name, bytes_in * per, 1.0, "lsu", {}, true, 1.0 - res, false, 0.0));
+  body.push_back(gload(hw, "load:" + in_name, bytes_in * per, 1.0, "lsu", {}, true, 1.0 - res, false, 0.0, slice_frac));
   TraceAction comp;
   comp.name = "compute";
   comp.work["cuda"] = hw.cuda_time_per_sm(flops * per);
@@ -434,7 +459,7 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   comp.deps = {0};
   comp.latency = hw.unit_latency_s(sfu_ops > 0 ? "sfu" : "cuda");
   body.push_back(comp);
-  body.push_back(gstore("store:" + out_name, bytes_out * per, {1}, 1.0 - res, hw.has_sram() ? res : 0.0));
+  body.push_back(gstore("store:" + out_name, bytes_out * per, {1}, 1.0 - res, hw.has_sram() ? res : 0.0, slice_frac));
 
   TraceKernel k;
   k.name = name;
@@ -493,6 +518,7 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
                                    : std::max<int64_t>(1, std::min<int64_t>(ntiles, (static_cast<int64_t>(hw.sms()) * resident + units - 1) / std::max<int64_t>(1, units)));
   int64_t iters = (ntiles + splits - 1) / splits;
   int64_t blocks = units * splits;
+  int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
 
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> order;
   for (int64_t b = 0; b < B; ++b)
@@ -514,6 +540,7 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
     }
   for (size_t i = 0; i < keys.size(); ++i) { addrs.push_back(static_cast<int64_t>(i * tile_b)); sizes.push_back(tile_b); }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
+  double slice_frac = slice_bw_frac(concurrent_blocks, lmap.ports);
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
                                                     n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
@@ -526,7 +553,6 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
     // now: `stages`-deep multi-buffering x one tile's K/V bytes x however many blocks are
     // concurrently resident GPU-wide. Comparing that (not B*kv_heads*S, the entire sequence)
     // against sram_capacity_for("kv") is what "only the part currently needed" means.
-    int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
     double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
     fs = f * (1 - resident_frac(hw, kv_active, "kv"));
     has_fs = true;
@@ -537,10 +563,10 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
   auto [pv_lane, pv_t] = hw.mma_cost(2.0 * hb_c * tile.block_n * d_v, compute_dtype);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, v_in_k ? "load:kv_cache(latent)" : "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0));
+  body.push_back(gload(hw, v_in_k ? "load:kv_cache(latent)" : "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
   int iv = 0;
   if (!v_in_k) {
-    body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0));
+    body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
     iv = 1;
   }
   {
@@ -646,6 +672,7 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   if (resident < 1) return std::nullopt;
   auto [rpt, spill] = reg_estimate(hw, static_cast<int64_t>(bm * (d_v + bn) * 4), threads - 128);
   int64_t blocks = B * H * qt;
+  int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
 
   std::vector<std::tuple<int64_t, int64_t, int64_t>> order;
   for (int64_t b = 0; b < B; ++b)
@@ -670,6 +697,7 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   double tb = (k_tile + v_tile) / 2.0;
   for (size_t i = 0; i < keys.size(); ++i) { addrs.push_back(static_cast<int64_t>(i * tb)); sizes.push_back(tb); }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
+  double slice_frac = slice_bw_frac(concurrent_blocks, lmap.ports);
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
                                                     n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
@@ -680,7 +708,6 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
     // Same reasoning as lower_attention_decode: the buffer holds whatever's actively streaming
     // right now (stages-deep x one K/V tile x concurrently-resident blocks), not the whole
     // sequence's KV.
-    int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
     double kv_active = static_cast<double>(tile.stages) * (k_tile + v_tile) * static_cast<double>(concurrent_blocks);
     fs = f * (1 - resident_frac(hw, kv_active, "kv"));
     has_fs = true;
@@ -691,8 +718,8 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   auto [pv_lane, pv_t] = hw.mma_cost(2.0 * bm_c * bn * d_v, compute_dtype);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0));
-  body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0));
+  body.push_back(gload(hw, "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
+  body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
   {
     TraceAction qk;
     qk.name = "gemm_qk";

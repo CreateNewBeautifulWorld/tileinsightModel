@@ -70,7 +70,7 @@ def test_gemm_tc_bound_matches_flop_formula():
 
 
 @pytest.mark.parametrize("phase,batch,expected_s,limiter", [
-    ("decode", 64, 0.02663803906891158, "ddr"),
+    ("decode", 64, 0.029989698473958243, "ddr"),
     ("prefill", 8, 0.16973208393601716, "tc"),
 ])
 def test_kimi_step_time_regression(phase, batch, expected_s, limiter):

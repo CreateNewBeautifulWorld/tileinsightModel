@@ -165,6 +165,26 @@ and was dropped from the port — it was dead code even before this rewrite (not
 simulation path called it, only its own tests did); the deterministic tile-level simulation
 above is what every lowering actually uses.
 
+**L2/DDR bandwidth is not one GPU-wide pool.** §2's `l2`/`ddr` lanes model the *configured
+aggregate* bandwidth, fair-shared across active cores (`shader_core::per_core_rate`) — but
+physically each memory slice owns its own L2 port and its own HBM channel, and a tile's address
+routes it to exactly one slice (`memory.addressing.l2`, the same `AddrCfg`/`port_of()` used
+above for the tile-cache simulation). A kernel can only draw the full aggregate bandwidth if it
+keeps at least as many blocks concurrently in flight as there are slices; with fewer, only that
+many slices are ever touched and the reachable bandwidth is capped proportionally. `gpu_top.cpp`
+applies this as `slice_bw_frac(concurrent_blocks, n_slices) = min(1, concurrent_blocks /
+n_slices)`, scaling up the `l2`/`ddr` bytes charged in `gload`/`gstore` by `1/slice_bw_frac`
+wherever it is below 1 (GEMM A/B/C, attention KV). `concurrent_blocks` is the same
+occupancy-derived quantity already used for on-chip-buffer residency (`sms() × resident`, capped
+by the kernel's total block count) — deliberately *not* derived from the synthetic per-tile
+address stream the L2 hit/miss simulation builds, since that stream is tuned for cache behavior
+and aliases badly (power-of-two tile strides against the interleave granularity) if reused to
+judge bandwidth spread. This mainly shows up for small-grid kernels (e.g. low-batch decode
+attention, whose block count is `batch·kv_heads·groups·splits`): a big compute-bound GEMM has
+far more concurrent blocks than slices and sees no penalty; a decode step with too few blocks in
+flight to reach every slice does. See `tests/test_paths_addr_buffer.py::
+test_l2_ddr_bandwidth_is_capped_by_memory_slices`.
+
 ## 5. Kernel lowerings
 ### 5.1 GEMM (`model/gpu_top/gpu_top.cpp`, `lower_gemm`)
 `C[b] = A[b]·B[b]`, grid `batch·⌈M/bm⌉·⌈N/bn⌉·split_k`, `iters = ⌈⌈K/bk⌉/split_k⌉`.
