@@ -47,8 +47,8 @@ memory:
     per_sm_lines: 512    # [calib] cache lines in flight per SM
     dma_per_engine_lines: 1024   # [calib]
   dma:
-    engines: 8           # [calib] copy engines
-    per_l2_block: true   # [calib] one engine per L2 block (false = a single shared engine)
+    engines: 8           # [calib] copy engines; a DMA can move data from any HBM channel to any
+                         # memory slice, so this is a flat GPU-wide count, not per-slice
     destination: smem    # smem | l2 | bypass — where the engine drops the data
   l1:
     owner: cluster       # [spec] sm | cluster (Hopper/Blackwell clusters share through DSMEM)

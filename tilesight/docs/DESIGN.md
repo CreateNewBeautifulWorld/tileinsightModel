@@ -258,18 +258,19 @@ hugepage-keyed trace now too, not just L2/gload. **Still deliberately out of sco
 blocked tile addressing, so a 2-D tile's bytes are contiguous for hugepage-alignment purposes
 instead of the plain row-major layout `common/cache/address_map` assumes today.
 
-**DMA engine concurrency (`memory.dma.engines` / `.per_l2_block` /
-`memory.outstanding.dma_per_engine_lines`).** These three fields existed in the schema but were
-pure dead config — `dma_per_engine_lines` was even commented "recorded; not yet a cap". With a
-hugepage configured, a DMA moves one discrete unit per operation, which makes "how many can be in
-flight at once" a real, countable concurrency question for the first time — the same Little's-law
-shape `HardwareSpec.outstanding_cap` already uses for generic per-SM cache lines, just for DMA
-engines instead: `HardwareSpec.dma_engine_limited_rate(configured) = min(configured, engines ×
-dma_per_engine_lines × hugepage_bytes / DDR latency)`. `per_l2_block` swaps the flat `engines`
-count for one engine per memory slice (`memory.addressing.l2.ports`). This caps the `ddr` lane's
-`total_rate` in `HardwareSpec.lanes()` directly — no C++ engine changes needed, since lanes are
-already GPU-config data the round-time formula consumes generically. Both knobs default to 0
-(`dma_per_engine_lines`) so this changes no existing preset's behavior unless explicitly
+**DMA engine concurrency (`memory.dma.engines` / `memory.outstanding.dma_per_engine_lines`).**
+These two fields existed in the schema but were pure dead config — `dma_per_engine_lines` was even
+commented "recorded; not yet a cap". With a hugepage configured, a DMA moves one discrete unit per
+operation, which makes "how many can be in flight at once" a real, countable concurrency question
+for the first time — the same Little's-law shape `HardwareSpec.outstanding_cap` already uses for
+generic per-SM cache lines, just for DMA engines instead:
+`HardwareSpec.dma_engine_limited_rate(configured) = min(configured, engines ×
+dma_per_engine_lines × hugepage_bytes / DDR latency)`. A DMA engine is not tied to a memory slice
+— it can move data from any HBM channel to any slice — so `engines` is a flat GPU-wide count, never
+per-slice. This caps the `ddr` lane's `total_rate` in `HardwareSpec.lanes()` directly — no C++
+engine changes needed, since lanes are already GPU-config data the round-time formula consumes
+generically. Both knobs default to 0 (`dma_per_engine_lines`) so this changes no existing preset's
+behavior unless explicitly
 calibrated in. See
 `tests/test_paths_addr_buffer.py::test_dma_engines_cap_ddr_bandwidth_when_hugepages_are_discrete`.
 
@@ -464,7 +465,7 @@ MSHR-style limit on cache lines in flight per SM and gives a Little's-law ceilin
 speed up when HBM gets wider: 64 lines -> 10 GB/s/SM and a 345 µs GEMM, 512 lines ->
 77 GB/s/SM and 83 µs, 2048 lines -> the 180 GB/s per-SM cap and 82.7 µs.
 
-**Where a DMA drops the data.** `memory.dma`: `engines`, `per_l2_block`, and `destination`:
+**Where a DMA drops the data.** `memory.dma`: `engines` and `destination`:
 `smem` (global -> SMEM, the bytes still cross the L2 datapath), `l2` (the engine fills L2 and
 the consumer reads it back — extra L2 write traffic) or `bypass` (engine -> consumer, the L2
 datapath is skipped). Same B300 GEMM: 82.7 / 131.4 / 82.5 µs with L2 occupancy 68% / 84% / 2%.

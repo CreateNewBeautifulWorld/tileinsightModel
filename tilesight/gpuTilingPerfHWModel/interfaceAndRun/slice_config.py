@@ -290,7 +290,6 @@ def to_hardware_spec(cfg: dict) -> HardwareSpec:
             "onchip": {"smem": {"capacity_KB": d["smem_per_tensor_core_KB"],
                                 "bytes_per_clk": 128, "latency_cycles": 30}},
             "dma": {"engines": mslices * sget(cfg, "memory_slice.dma_ports"),
-                    "per_l2_block": True,
                     "destination": "bypass" if l2_mb <= 0 else "smem"},
             "outstanding": {"per_sm_lines": 0},
             "queueing": {"coef": 0.0, "max_factor": 3.0},

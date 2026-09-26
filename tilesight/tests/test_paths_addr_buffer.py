@@ -244,14 +244,16 @@ def test_l2_blocks_and_outstanding_limits_are_enforced():
 
 
 def test_dma_engines_cap_ddr_bandwidth_when_hugepages_are_discrete():
-    """memory.dma.engines/per_l2_block and memory.outstanding.dma_per_engine_lines were pure
-    unused config until now ("recorded; not yet a cap"). With a hugepage configured, a DMA moves
-    a discrete unit per operation, so "how many can be in flight at once" becomes a real,
-    countable concurrency limit -- the same Little's-law shape as outstanding_cap's generic
-    per-SM cache-line limit, just for engines instead of per-SM lines: `engines x
-    dma_per_engine_lines x hugepage_bytes / DDR latency`. Both knobs default to leaving the
-    aggregate configured bandwidth untouched, so no existing preset changes behavior."""
-    hp = {"memory.dma.hugepage_KB": 2048, "memory.dma.per_l2_block": False}
+    """memory.dma.engines and memory.outstanding.dma_per_engine_lines were pure unused config
+    until now ("recorded; not yet a cap"). With a hugepage configured, a DMA moves a discrete unit
+    per operation, so "how many can be in flight at once" becomes a real, countable concurrency
+    limit -- the same Little's-law shape as outstanding_cap's generic per-SM cache-line limit,
+    just for engines instead of per-SM lines: `engines x dma_per_engine_lines x hugepage_bytes /
+    DDR latency`. A DMA engine is not tied to a memory slice -- it can move data from any HBM
+    channel to any slice -- so `engines` is a flat GPU-wide count, never per-slice. Both knobs
+    default to leaving the aggregate configured bandwidth untouched, so no existing preset changes
+    behavior."""
+    hp = {"memory.dma.hugepage_KB": 2048}
 
     # Unset (either knob left at 0) -> no cap at all, whatever the other is.
     base_rate = {l.name: l for l in HW.lanes()}["ddr"].total_rate
@@ -266,12 +268,6 @@ def test_dma_engines_cap_ddr_bandwidth_when_hugepages_are_discrete():
     assert one.dma_engine_limited_rate(base_rate) < eight.dma_engine_limited_rate(base_rate) <= base_rate
     expected_one = 1 * 1 * 2048 * 1024 / one.unit_latency_s("ddr")
     assert abs(one.dma_engine_limited_rate(base_rate) - expected_one) < 1.0
-
-    # per_l2_block swaps the flat engine count for one engine per memory slice.
-    per_block = one.override({"memory.dma.per_l2_block": True})
-    n_slices = one.get("memory.addressing.l2.ports")
-    expected_block = n_slices * 1 * 2048 * 1024 / one.unit_latency_s("ddr")
-    assert abs(per_block.dma_engine_limited_rate(base_rate) - min(base_rate, expected_block)) < 1.0
 
     # Feeds through to the actual "ddr" lane, and a tighter cap really does slow a ddr-bound kernel.
     lim = one.lanes()

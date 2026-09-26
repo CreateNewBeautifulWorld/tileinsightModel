@@ -269,11 +269,9 @@ FIELDS: tuple[Field, ...] = (
 
     # ---------------------------------------------------------------- DMA
     F("memory.dma.engines", "int", "count", 1, "spec", "memory.dma",
-      "Copy engines. Feeds dma_engine_limited_rate's concurrency cap (with hugepage_KB and "
-      "outstanding.dma_per_engine_lines also set); ignored when per_l2_block is true"),
-    F("memory.dma.per_l2_block", "bool", "", False, "spec", "memory.dma",
-      "One engine per L2 block/memory slice (memory.addressing.l2.ports) instead of the flat "
-      "memory.dma.engines count, for dma_engine_limited_rate's concurrency cap"),
+      "Copy engines; a DMA can move data from any HBM channel to any memory slice, so this is a "
+      "flat GPU-wide count, not per-slice. Feeds dma_engine_limited_rate's concurrency cap (with "
+      "hugepage_KB and outstanding.dma_per_engine_lines also set)"),
     F("memory.dma.destination", "str", "", "smem", "policy", "memory.dma",
       "Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass"),
     F("memory.dma.hugepage_KB", "float", "KB", 0, "calib", "memory.dma",

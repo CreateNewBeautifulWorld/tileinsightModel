@@ -197,8 +197,7 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 
 | field | type | unit | default | tag | meaning |
 |---|---|---|---|---|---|
-| `memory.dma.engines` | int | count | `1` | spec | Copy engines. Feeds dma_engine_limited_rate's concurrency cap (with hugepage_KB and outstanding.dma_per_engine_lines also set); ignored when per_l2_block is true |
-| `memory.dma.per_l2_block` | bool | — | `False` | spec | One engine per L2 block/memory slice (memory.addressing.l2.ports) instead of the flat memory.dma.engines count, for dma_engine_limited_rate's concurrency cap |
+| `memory.dma.engines` | int | count | `1` | spec | Copy engines; a DMA can move data from any HBM channel to any memory slice, so this is a flat GPU-wide count, not per-slice. Feeds dma_engine_limited_rate's concurrency cap (with hugepage_KB and outstanding.dma_per_engine_lines also set) |
 | `memory.dma.destination` | str | — | `smem` | policy | Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass |
 | `memory.dma.hugepage_KB` | float | KB | `0` | calib | Fixed size of one DMA operation: a DMA moves exactly one hugepage, never less (0 = unset: fall back to an occupancy proxy for L2/DDR slice spread; NVIDIA DMA/TMA moves 2048). Splits evenly across every memory slice by construction; if it doesn't divide evenly by memory.addressing.l2's granularity x port count (e.g. 2048 over 12 ports), it is padded up to what the fullest slice would get, never rejected or underestimated. Also changes the L2 simulation's cache atom (for GEMM A/B and attention K/V) to hugepage granularity, so real reuse across loop iterations shows up as a hit instead of a fresh miss every call |
 
@@ -234,4 +233,4 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 |---|---|---|---|---|---|
 | `runtime.launch_overhead_us` | float | us | `2.0` | calib | Per-kernel launch cost; ~0.5-1 with CUDA graphs |
 
-Total: 132 fields (63 spec, 37 calib, 20 policy, 12 loss).
+Total: 131 fields (62 spec, 37 calib, 20 policy, 12 loss).
