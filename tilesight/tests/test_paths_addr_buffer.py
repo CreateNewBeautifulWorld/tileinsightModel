@@ -237,6 +237,45 @@ def test_l2_ddr_bandwidth_is_capped_by_memory_slices():
     assert k_wide.trace.body[0].work["ddr"] == pytest.approx(ddr16)
 
 
+def test_mega_dma_tile_routes_by_construction_not_by_simulated_address():
+    """memory.dma.mega_tile_KB models the fixed byte granularity of one DMA burst. It splits by
+    definition into memory.addressing.l2's port count of equal atoms, one per slice, round-robin
+    — no simulated address, so it can't alias the way the L2 hit/miss simulation's synthetic tile
+    stream does on power-of-two strides. Unset (default), lower_gemm falls back to the occupancy
+    proxy from test_l2_ddr_bandwidth_is_capped_by_memory_slices."""
+    t = TileConfig(bm=128, bn=128, bk=64)
+    ports16 = {"ports": 16, "mode": "interleave", "granularity_KB": 1}
+
+    def kernel(mega_tile_KB):
+        hw = HW.override({"memory.addressing.l2": ports16, "memory.dma.mega_tile_KB": mega_tile_KB})
+        k = _lower_gemm(hw, 512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
+        return hw, k
+
+    # a_tile = bm*bk*ab = 128*64*1 = 8192 bytes.
+    a_tile = 128 * 64 * 1.0
+
+    hw_off = HW.override({"memory.addressing.l2": ports16})
+    k_off = _lower_gemm(hw_off, 512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
+    ddr_off = k_off.trace.body[0].work["ddr"]
+
+    # A tiny mega tile (atom = mega/16 << a_tile) -> the transfer covers every atom many times
+    # over, saturating all 16 slices with no rounding waste (8192 is an exact multiple of 256).
+    hw_small, k_small = kernel(4)  # atom = 4KB/16 = 256B; 8192/256 = 32 atoms, capped at 16
+    assert k_small.trace.body[0].work["ddr"] == pytest.approx(ddr_off)  # full saturation either way
+
+    # A mega tile *bigger* than the whole transfer (atom = mega/16 > a_tile) -> the transfer can't
+    # even fill one atom on every slice: touched = ceil(a_tile/atom) < 16, and it pays for the
+    # rounding waste on top (padded > a_tile).
+    hw_big, k_big = kernel(64)  # atom = 64KB/16 = 4096B; ceil(8192/4096) = 2 atoms touched
+    ddr_big = k_big.trace.body[0].work["ddr"]
+    touched, n = 2, 16
+    padded = 2 * (64 * 1024 / 16)
+    expected = ddr_off * (padded * n) / (a_tile * touched)
+    assert ddr_big == pytest.approx(expected)
+    assert ddr_big > ddr_off
+    assert evaluate(k_big, hw_big).time_s > evaluate(k_off, hw_off).time_s
+
+
 def test_dma_destination_changes_which_lanes_are_used():
     to_smem, to_l2, bypass = (_k(HW.override({"memory.dma.destination": d}))
                               for d in ("smem", "l2", "bypass"))

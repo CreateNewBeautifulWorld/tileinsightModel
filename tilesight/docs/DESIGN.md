@@ -185,6 +185,23 @@ far more concurrent blocks than slices and sees no penalty; a decode step with t
 flight to reach every slice does. See `tests/test_paths_addr_buffer.py::
 test_l2_ddr_bandwidth_is_capped_by_memory_slices`.
 
+**`memory.dma.mega_tile_KB`** replaces that occupancy proxy with a size-based one when a preset
+sets it (default 0 = unset, no behavior change). A "mega tile" is the fixed byte granularity of
+one DMA burst; it splits **by definition, not by simulated address** into `memory.addressing.l2`'s
+port count of equal atoms, round-robined one per slice — `slice_bw_frac` in `gpu_top.cpp` computes
+`atom = mega_tile_bytes / n_slices`, `atoms = ceil(transfer_bytes / atom)`,
+`touched = min(n_slices, atoms)`, and bills `transfer_bytes` rounded up to whole atoms
+(`padded = atoms * atom`) at `padded × n_slices / touched` — i.e. no penalty and no waste once a
+transfer already covers every atom (`atoms ≥ n_slices` and `transfer_bytes` a multiple of `atom`),
+a bandwidth penalty when it can't fill even `n_slices` atoms, and a separate rounding-waste cost
+whenever `transfer_bytes` isn't a whole number of atoms — all without touching the L2 hit/miss
+simulation's address stream, so it can't inherit that stream's power-of-two aliasing. This is a
+genuine trade-off knob, not a strictly-better replacement for the occupancy proxy: a `mega_tile_KB`
+much larger than a kernel's real per-transfer tile *hurts* it (mostly rounding waste, only
+partial slice coverage), so it needs a real DMA/TMA burst-size calibration per part, tagged
+`calib` like the rest of §4's cache numbers — it is not derived from anything else in the config.
+See `tests/test_paths_addr_buffer.py::test_mega_dma_tile_routes_by_construction_not_by_simulated_address`.
+
 ## 5. Kernel lowerings
 ### 5.1 GEMM (`model/gpu_top/gpu_top.cpp`, `lower_gemm`)
 `C[b] = A[b]·B[b]`, grid `batch·⌈M/bm⌉·⌈N/bn⌉·split_k`, `iters = ⌈⌈K/bk⌉/split_k⌉`.

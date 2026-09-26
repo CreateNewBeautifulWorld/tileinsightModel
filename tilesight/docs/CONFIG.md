@@ -200,6 +200,7 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 | `memory.dma.engines` | int | count | `1` | spec | Copy engines |
 | `memory.dma.per_l2_block` | bool | — | `False` | spec | One engine per L2 block (false = a single shared engine) |
 | `memory.dma.destination` | str | — | `smem` | policy | Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass |
+| `memory.dma.mega_tile_KB` | float | KB | `0` | calib | Fixed byte granularity of one DMA burst (0 = unset: fall back to an occupancy proxy for L2/DDR slice spread). When set, a burst splits by definition into memory.addressing.l2's port count of equal atoms, one per memory slice — this is what lets a transfer reach every slice's bandwidth without needing many concurrent blocks in flight |
 
 ## load_paths
 
@@ -233,4 +234,4 @@ The model only ever sees these fields. `spec` = copy it from the vendor, `calib`
 |---|---|---|---|---|---|
 | `runtime.launch_overhead_us` | float | us | `2.0` | calib | Per-kernel launch cost; ~0.5-1 with CUDA graphs |
 
-Total: 131 fields (63 spec, 36 calib, 20 policy, 12 loss).
+Total: 132 fields (63 spec, 37 calib, 20 policy, 12 loss).

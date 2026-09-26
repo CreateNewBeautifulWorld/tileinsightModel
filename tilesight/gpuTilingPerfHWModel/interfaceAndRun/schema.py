@@ -270,6 +270,11 @@ FIELDS: tuple[Field, ...] = (
       "One engine per L2 block (false = a single shared engine)"),
     F("memory.dma.destination", "str", "", "smem", "policy", "memory.dma",
       "Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass"),
+    F("memory.dma.mega_tile_KB", "float", "KB", 0, "calib", "memory.dma",
+      "Fixed byte granularity of one DMA burst (0 = unset: fall back to an occupancy proxy for "
+      "L2/DDR slice spread). When set, a burst splits by definition into memory.addressing.l2's "
+      "port count of equal atoms, one per memory slice — this is what lets a transfer reach every "
+      "slice's bandwidth without needing many concurrent blocks in flight"),
 
     # ---------------------------------------------------------------- load paths
     F("load_paths", "map", "", REQUIRED, "spec", "load_paths",

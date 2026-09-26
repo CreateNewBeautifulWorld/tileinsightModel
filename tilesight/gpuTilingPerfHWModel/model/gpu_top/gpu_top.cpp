@@ -170,18 +170,32 @@ double resident_frac(const HwView& hw, double footprint_bytes, const std::string
   return on_chip_buffer::resident_frac(true, has_override, fp_override, cap, footprint_bytes);
 }
 
-// L2 and DDR are not one GPU-wide pool: each memory slice owns its own L2 port and HBM channel,
-// and a tile's address (see l2_addr_cfg/AddrCfg above) routes it to exactly one slice. A kernel
-// can only draw the *aggregate* configured L2/DDR bandwidth when it keeps enough independent
-// blocks in flight to spread traffic over every slice; with fewer concurrently-active blocks than
-// slices, only that many slices' worth of bandwidth is actually reachable. This is deliberately
-// computed from occupancy (concurrently-resident blocks vs. slice count), not from the synthetic
-// per-tile address stream the L2 hit/miss simulation builds: that stream is tuned for cache
-// behavior and aliases badly (power-of-two tile strides vs. interleave granularity) if reused to
-// judge bandwidth spread.
-double slice_bw_frac(int64_t concurrent_blocks, int n_slices) {
-  if (n_slices <= 1 || concurrent_blocks <= 0) return 1.0;
-  return std::min(1.0, static_cast<double>(concurrent_blocks) / static_cast<double>(n_slices));
+// L2 and DDR are not one GPU-wide pool: each memory slice owns its own L2 port and HBM channel.
+// `memory.dma.mega_tile_KB`, when configured, models the fixed byte granularity of one DMA
+// burst: it splits — by definition, not by simulated address — into n_slices equal atoms,
+// round-robined one per slice. A transfer needing fewer atoms than there are slices only ever
+// reaches that many slices; one needing more finishes some slices' atoms before others but
+// reaches every slice it needs at the full per-slice rate. Rounding a transfer up to whole atoms
+// is the only waste charged — there is no address arithmetic to alias, unlike two earlier attempts
+// at this same problem that derived slice spread from the L2 hit/miss simulation's synthetic
+// per-tile address stream (tuned for cache behavior, and it aliases badly on power-of-two tile
+// strides vs. the interleave granularity).
+// Unconfigured (mega_tile_KB <= 0, the default), falls back to the coarser occupancy proxy: how
+// many blocks are concurrently resident vs. how many slices there are — no behavior change for
+// any preset that hasn't opted in.
+double slice_bw_frac(const HwView& hw, int n_slices, int64_t concurrent_blocks, double nbytes) {
+  n_slices = std::max(1, n_slices);
+  if (nbytes <= 0) return 1.0;
+  double mega = hw.get_num("memory.dma.mega_tile_KB", 0.0) * 1024.0;
+  if (mega <= 0) {
+    if (n_slices <= 1 || concurrent_blocks <= 0) return 1.0;
+    return std::min(1.0, static_cast<double>(concurrent_blocks) / static_cast<double>(n_slices));
+  }
+  double atom = std::max(1.0, mega / n_slices);
+  double atoms = std::max(1.0, std::ceil(nbytes / atom));
+  double touched = std::min<double>(n_slices, atoms);
+  double padded = atoms * atom;
+  return nbytes * touched / (padded * n_slices);
 }
 
 }  // namespace
@@ -293,7 +307,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     }
   }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
-  double slice_frac = slice_bw_frac(concurrent_blocks, lmap.ports);
+  auto slice_frac = [&](double nbytes) { return slice_bw_frac(hw, lmap.ports, concurrent_blocks, nbytes); };
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   std::string policy = hw.get_str("memory.l2.policy", "lru");
   bool through_l1 = false;
@@ -355,8 +369,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   auto [mma_lane, mma_t] = hw.mma_cost(2.0 * bm_c * t.bn * t.bk, comp_dt);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a, slice_frac));
-  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b, slice_frac));
+  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a, slice_frac(a_tile)));
+  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b, slice_frac(b_tile / cl)));
   {
     TraceAction mma;
     mma.name = "mma";
@@ -369,7 +383,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   if (spill) {
     TraceAction sp;
     sp.name = "spill:regs";
-    sp.work["l2"] = 2.0 * spill / std::max<int64_t>(1, iters) / slice_frac;
+    sp.work["l2"] = 2.0 * spill / std::max<int64_t>(1, iters) / slice_frac(a_tile);
     sp.deps = {2};
     body.push_back(sp);
   }
@@ -382,7 +396,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     acc_a.work["cuda"] = hw.cuda_time_per_sm(2.0 * t.bm * t.bn);
     acc_a.latency = hw.unit_latency_s(hw.has_tmem() ? "tmem" : "cuda");
     epilogue.push_back(acc_a);
-    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0, slice_frac));
+    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0, slice_frac(out_bytes)));
   }
 
   double useful = 2.0 * M * N * K * batch;
@@ -449,9 +463,10 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * elementwise_resident);
   double active_bytes = std::max(bytes_in, bytes_out) * per * static_cast<double>(concurrent_blocks);
   double res = oc ? resident_frac(hw, active_bytes, "act") : 0.0;
-  double slice_frac = slice_bw_frac(concurrent_blocks, l2_addr_cfg(hw).ports);
+  int n_slices = l2_addr_cfg(hw).ports;
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:" + in_name, bytes_in * per, 1.0, "lsu", {}, true, 1.0 - res, false, 0.0, slice_frac));
+  body.push_back(gload(hw, "load:" + in_name, bytes_in * per, 1.0, "lsu", {}, true, 1.0 - res, false, 0.0,
+                       slice_bw_frac(hw, n_slices, concurrent_blocks, bytes_in * per)));
   TraceAction comp;
   comp.name = "compute";
   comp.work["cuda"] = hw.cuda_time_per_sm(flops * per);
@@ -459,7 +474,8 @@ std::vector<LoweredKernel> lower_elementwise(const HwView& hw, const std::string
   comp.deps = {0};
   comp.latency = hw.unit_latency_s(sfu_ops > 0 ? "sfu" : "cuda");
   body.push_back(comp);
-  body.push_back(gstore("store:" + out_name, bytes_out * per, {1}, 1.0 - res, hw.has_sram() ? res : 0.0, slice_frac));
+  body.push_back(gstore("store:" + out_name, bytes_out * per, {1}, 1.0 - res, hw.has_sram() ? res : 0.0,
+                        slice_bw_frac(hw, n_slices, concurrent_blocks, bytes_out * per)));
 
   TraceKernel k;
   k.name = name;
@@ -540,7 +556,6 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
     }
   for (size_t i = 0; i < keys.size(); ++i) { addrs.push_back(static_cast<int64_t>(i * tile_b)); sizes.push_back(tile_b); }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
-  double slice_frac = slice_bw_frac(concurrent_blocks, lmap.ports);
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
                                                     n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
@@ -563,10 +578,12 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
   auto [pv_lane, pv_t] = hw.mma_cost(2.0 * hb_c * tile.block_n * d_v, compute_dtype);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, v_in_k ? "load:kv_cache(latent)" : "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
+  body.push_back(gload(hw, v_in_k ? "load:kv_cache(latent)" : "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs,
+                       false, 0.0, slice_bw_frac(hw, lmap.ports, concurrent_blocks, k_tile)));
   int iv = 0;
   if (!v_in_k) {
-    body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
+    body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0,
+                         slice_bw_frac(hw, lmap.ports, concurrent_blocks, v_tile)));
     iv = 1;
   }
   {
@@ -697,7 +714,6 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   double tb = (k_tile + v_tile) / 2.0;
   for (size_t i = 0; i < keys.size(); ++i) { addrs.push_back(static_cast<int64_t>(i * tb)); sizes.push_back(tb); }
   cache::AddrCfg lmap = l2_addr_cfg(hw);
-  double slice_frac = slice_bw_frac(concurrent_blocks, lmap.ports);
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
   cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
                                                     n_part, lmap, hw.get_str("memory.l2.policy", "lru"));
@@ -718,8 +734,10 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   auto [pv_lane, pv_t] = hw.mma_cost(2.0 * bm_c * bn * d_v, compute_dtype);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
-  body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0, slice_frac));
+  body.push_back(gload(hw, "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0,
+                       slice_bw_frac(hw, lmap.ports, concurrent_blocks, k_tile)));
+  body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0,
+                       slice_bw_frac(hw, lmap.ports, concurrent_blocks, v_tile)));
   {
     TraceAction qk;
     qk.name = "gemm_qk";
