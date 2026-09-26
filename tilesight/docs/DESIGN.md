@@ -185,22 +185,36 @@ far more concurrent blocks than slices and sees no penalty; a decode step with t
 flight to reach every slice does. See `tests/test_paths_addr_buffer.py::
 test_l2_ddr_bandwidth_is_capped_by_memory_slices`.
 
-**`memory.dma.mega_tile_KB`** replaces that occupancy proxy with a size-based one when a preset
-sets it (default 0 = unset, no behavior change). A "mega tile" is the fixed byte granularity of
-one DMA burst; it splits **by definition, not by simulated address** into `memory.addressing.l2`'s
-port count of equal atoms, round-robined one per slice — `slice_bw_frac` in `gpu_top.cpp` computes
-`atom = mega_tile_bytes / n_slices`, `atoms = ceil(transfer_bytes / atom)`,
-`touched = min(n_slices, atoms)`, and bills `transfer_bytes` rounded up to whole atoms
-(`padded = atoms * atom`) at `padded × n_slices / touched` — i.e. no penalty and no waste once a
-transfer already covers every atom (`atoms ≥ n_slices` and `transfer_bytes` a multiple of `atom`),
-a bandwidth penalty when it can't fill even `n_slices` atoms, and a separate rounding-waste cost
-whenever `transfer_bytes` isn't a whole number of atoms — all without touching the L2 hit/miss
-simulation's address stream, so it can't inherit that stream's power-of-two aliasing. This is a
-genuine trade-off knob, not a strictly-better replacement for the occupancy proxy: a `mega_tile_KB`
-much larger than a kernel's real per-transfer tile *hurts* it (mostly rounding waste, only
-partial slice coverage), so it needs a real DMA/TMA burst-size calibration per part, tagged
-`calib` like the rest of §4's cache numbers — it is not derived from anything else in the config.
-See `tests/test_paths_addr_buffer.py::test_mega_dma_tile_routes_by_construction_not_by_simulated_address`.
+**`memory.dma.hugepage_KB`** replaces that occupancy proxy with a size-based one when a preset
+sets it (default 0 = unset, no behavior change). A DMA moves exactly one **mega tile** per
+operation, never less. A mega tile is, **by construction** (asserted, not simulated — see
+below), a whole multiple of `memory.addressing.l2`'s granularity × port count, so every mega tile
+a DMA moves spans every slice evenly: there is no partial-slice case at all, and no address
+arithmetic to alias (unlike the L2 hit/miss simulation's synthetic per-tile address stream, which
+aliases on power-of-two tile strides — the reason two earlier attempts at slice-aware bandwidth
+failed). `slice_bw_frac` in `gpu_top.cpp` asserts `mega_tile_bytes % (granularity × n_slices) ==
+0` (`std::invalid_argument` otherwise — a config error, not an illegal-tile `nullopt`), then bills
+`n_mega = ceil(transfer_bytes / mega_tile_bytes)` whole mega tiles at
+`n_mega × mega_tile_bytes / transfer_bytes` — i.e. no cost at all once `mega_tile_bytes` divides
+`transfer_bytes` evenly, and pure rounding waste (never an imbalance penalty — full slice spread
+is guaranteed by construction) whenever it doesn't. This is a genuine trade-off knob, not a
+strictly-better replacement for the occupancy proxy: a `hugepage_KB` much larger than a kernel's
+real per-transfer tile size is mostly waste, so it needs a real DMA/TMA burst-size calibration per
+part, tagged `calib` like the rest of §4's cache numbers — it is not derived from anything else in
+the config. See
+`tests/test_paths_addr_buffer.py::test_mega_dma_tile_routes_by_construction_not_by_simulated_address`.
+
+**Deliberately out of scope for this pass** (flagged, not attempted, given how the two failed
+address-based attempts above already show the cost of guessing wrong in this exact area): folding
+mega-tile granularity into the L2 hit/miss simulation itself (residency would become an all-or-
+nothing per-(mega-tile, slice) shard instead of a continuous fraction, and a genuine cache hit
+would let a small transfer skip paying the mega-tile fetch cost entirely — right now every DMA-path
+`gload`/`gstore` call pays it independently of `simulate_l2`'s hit/miss result); the same whole-
+mega-tile granularity for on-chip buffer residency (`resident_frac`); and Z-order/blocked tile
+addressing (so a 2-D tile's bytes are contiguous for mega-tile alignment purposes, unlike a plain
+row-major layout). Each touches shared, tested machinery (`simulate_l2`'s atom sizing and its
+`l2_partition_*` meta fields, `on_chip_buffer::resident_frac`, `common/cache/address_map`) and
+deserves its own change, not folding into this one.
 
 ## 5. Kernel lowerings
 ### 5.1 GEMM (`model/gpu_top/gpu_top.cpp`, `lower_gemm`)
