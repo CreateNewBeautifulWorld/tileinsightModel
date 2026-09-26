@@ -312,8 +312,16 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   bool has_sa = false, has_sb = false;
   double sa = 0, sb = 0;
   if (has_sram) {
-    double ra = resident_frac(hw, M * K * ab * batch, tensor_class(an));
-    double rb_ = resident_frac(hw, K * N * bb * batch, tensor_class(bn_));
+    // Same principle as attention's KV: capacity competes with whatever's concurrently resident
+    // right now (stages-deep x one operand tile x concurrently-active blocks), not the whole
+    // A/B matrix. Reuse across several M/N-tiles from that one resident copy is share_a/share_b's
+    // job (an already-computed, searched staging factor) applied separately below — it says how
+    // many times a resident tile gets reused, not how big the resident footprint is.
+    int64_t concurrent_blocks = std::min<int64_t>(blocks, static_cast<int64_t>(hw.sms()) * resident);
+    double a_active = static_cast<double>(stages) * a_tile * static_cast<double>(concurrent_blocks);
+    double b_active = static_cast<double>(stages) * b_tile * static_cast<double>(concurrent_blocks);
+    double ra = resident_frac(hw, a_active, tensor_class(an));
+    double rb_ = resident_frac(hw, b_active, tensor_class(bn_));
     sa = fa * (1 - ra) / share_a;
     sb = fb * (1 - rb_) / share_b;
     has_sa = has_sb = true;
