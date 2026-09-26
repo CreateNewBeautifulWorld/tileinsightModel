@@ -189,13 +189,16 @@ test_l2_ddr_bandwidth_is_capped_by_memory_slices`.
 less (matching how NVIDIA's DMA/TMA engines actually burst — the name is deliberate: 2MB, the huge
 page size, is the expected real value). Unset (default 0), `gload`/`gstore` fall back to the
 occupancy proxy above unchanged — no behavior change for any preset that hasn't opted in. A
-hugepage is, **by construction** (asserted by `hugepage_bytes()` in `gpu_top.cpp`, never
-simulated), a whole multiple of `memory.addressing.l2`'s granularity × port count
-(`std::invalid_argument` otherwise — a config error, not an illegal-tile `nullopt`), so every
-hugepage a DMA moves spans every memory slice evenly: no partial-slice case, no address arithmetic
-to alias — unlike two earlier, failed attempts at slice-aware bandwidth that derived slice spread
-from the L2 hit/miss simulation's synthetic per-tile address stream (aliases on power-of-two tile
-strides).
+hugepage spans every memory slice evenly **by construction, never by simulated address**, unlike
+two earlier, failed attempts at slice-aware bandwidth that derived slice spread from the L2 hit/
+miss simulation's synthetic per-tile address stream (aliases on power-of-two tile strides).
+Real interleaving distributes it across slices one granule (`memory.addressing.l2`'s granularity)
+at a time, round-robin, so `hugepage_bytes()` in `gpu_top.cpp` doesn't require the hugepage to
+divide evenly by the port count — when it doesn't (e.g. a 2048 KB hugepage over H200's 12 L2 ports
+at 1 KB granules: 2048/12 = 170.67 granules/slice), some slices simply end up with one fewer
+granule than others in reality; rather than track which slice that is, it pads up to what the
+fullest slice gets (`ceil(granules / n_slices) × n_slices × granularity` — 171 granules ×
+12 × 1KB = 2052 KB here), never an underestimate of the real transfer.
 
 Configuring it also changes what the L2 simulation's cache atom *is*, for the tensor operand loads
 that already go through `simulate_l2` (GEMM A/B, attention K/V — "the matrix part"; Q, output

@@ -239,9 +239,14 @@ def test_l2_ddr_bandwidth_is_capped_by_memory_slices():
 
 def test_dma_hugepage_keys_the_l2_simulation_instead_of_rounding_after_the_fact():
     """memory.dma.hugepage_KB models a DMA that moves exactly one hugepage per operation, never
-    less, and must be a whole multiple of (L2 interleave granularity x port count) -- asserted, not
-    simulated -- so a hugepage always spans every slice evenly by construction: no partial-slice
-    case, no address arithmetic to alias.
+    less. Real interleaving distributes it across slices one granule at a time, round-robin; when
+    the granule count doesn't divide evenly by the slice count (e.g. a 2048 KB hugepage over 12
+    slices at 1 KB granules: 2048/12 = 170.67), some slices simply get one fewer granule than
+    others in reality. Rather than track which slice is short, hugepage_bytes() pads up to what the
+    fullest slice gets (171 granules here, i.e. an effective 2052 KB) -- never an underestimate,
+    still every slice reached, still no address arithmetic to alias, unlike two earlier attempts at
+    this same problem that derived slice spread from the L2 hit/miss simulation's synthetic
+    per-tile address stream (which aliases on power-of-two tile strides).
 
     Configuring it also changes the L2 simulation's cache atom from "one raw tile" to "one
     hugepage": lower_gemm keys the A/B access stream by hugepage index instead of loop index, so a
@@ -254,11 +259,13 @@ def test_dma_hugepage_keys_the_l2_simulation_instead_of_rounding_after_the_fact(
     guards against staying broken."""
     valid_addr = {"ports": 16, "mode": "interleave", "granularity_KB": 1}  # unit = 16KB
 
-    # An invalid hugepage (not a whole multiple of granularity x ports) is rejected outright.
-    with pytest.raises(ValueError):
-        _lower_gemm(HW.override({"memory.addressing.l2": valid_addr, "memory.dma.hugepage_KB": 24}),
-                   512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
-                   tile=TileConfig(bm=256, bn=128, bk=64))
+    # A hugepage that doesn't divide evenly by ports x granularity is padded up, not rejected:
+    # 24KB / 16KB unit = 1.5 -> padded to 2 units = 32KB.
+    odd_addr = {"ports": 12, "mode": "interleave", "granularity_KB": 1}   # 2048/12 doesn't divide evenly
+    k_odd = _lower_gemm(HW.override({"memory.addressing.l2": odd_addr, "memory.dma.hugepage_KB": 2048}),
+                        512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
+                        tile=TileConfig(bm=256, bn=128, bk=64))[0]
+    assert k_odd.trace.body[0].work["ddr"] == pytest.approx(k_odd.meta["l2_miss_A"] * 171 * 12 * 1024)
 
     big_tile = TileConfig(bm=128, bn=256, bk=64, cluster_m=2, cta_pair=True)
     hw = HW.override({"memory.addressing.l2": valid_addr, "memory.dma.hugepage_KB": 2048})

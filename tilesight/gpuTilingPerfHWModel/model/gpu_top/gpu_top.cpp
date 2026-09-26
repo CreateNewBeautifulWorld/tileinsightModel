@@ -4,7 +4,6 @@
 #include <cmath>
 #include <map>
 #include <sstream>
-#include <stdexcept>
 
 #include "../memory_slice/memory_slice.hpp"
 #include "../on_chip_buffer/on_chip_buffer.hpp"
@@ -194,26 +193,28 @@ double slice_bw_frac(int n_slices, int64_t concurrent_blocks) {
   return std::min(1.0, static_cast<double>(concurrent_blocks) / static_cast<double>(n_slices));
 }
 
-// A DMA moves exactly one hugepage per operation, never less. A hugepage is, by construction (and
-// asserted here, not simulated), an exact whole multiple of `cfg`'s granularity x port count, so
-// every hugepage a DMA moves spans every memory slice evenly — no partial-slice case, no address
-// arithmetic to alias, unlike two earlier attempts at this same problem that derived slice spread
-// from the L2 hit/miss simulation's synthetic per-tile address stream (aliases badly on
-// power-of-two tile strides vs. the interleave granularity). Returns 0 (disabled) when unset, or
-// when there is no L2 to key by hugepage at all: with zero L2 capacity nothing can ever stay
-// resident, so every access would wrongly cost a fresh hugepage instead of falling back to the
-// plain per-tile miss cost a no-L2 config already models correctly.
+// A DMA moves exactly one hugepage per operation, never less. Real interleaving distributes it
+// across slices one granule at a time, round-robin; when the granule count doesn't divide evenly
+// by the slice count, some slices simply end up with one fewer granule than others (still every
+// slice reached, still no address arithmetic to alias, unlike two earlier attempts at this same
+// problem that derived slice spread from the L2 hit/miss simulation's synthetic per-tile address
+// stream, which aliases on power-of-two tile strides). Rather than track which slice is the short
+// one, this pads up to what the fullest slice gets (never an underestimate of the real transfer):
+// `per_slice_granules = ceil(granules / n_slices)`, hugepage size = `per_slice_granules * n_slices
+// * granularity`. E.g. a 2048 KB hugepage over 12 slices at 1 KB granules doesn't split evenly
+// (2048 / 12 = 170.67); every slice is modeled as getting the 171 granules the fullest one does.
+// Returns 0 (disabled) when unset, or when there is no L2 to key by hugepage at all: with zero L2
+// capacity nothing can ever stay resident, so every access would wrongly cost a fresh hugepage
+// instead of falling back to the plain per-tile miss cost a no-L2 config already models correctly.
 double hugepage_bytes(const HwView& hw, const cache::AddrCfg& cfg) {
   if (hw.l2_capacity_bytes() <= 0) return 0.0;
   double hp = hw.get_num("memory.dma.hugepage_KB", 0.0) * 1024.0;
   if (hp <= 0) return 0.0;
-  double unit = static_cast<double>(std::max<int64_t>(1, cfg.granularity)) * std::max(1, cfg.ports);
-  double units = hp / unit;
-  if (units < 1.0 - 1e-9 || std::abs(units - std::llround(units)) > 1e-6)
-    throw std::invalid_argument(
-        "memory.dma.hugepage_KB must be a whole multiple of (L2 interleave granularity x "
-        "memory slice count) so a hugepage splits evenly across every slice");
-  return hp;
+  int64_t granularity = std::max<int64_t>(1, cfg.granularity);
+  int n_slices = std::max(1, cfg.ports);
+  int64_t granules = static_cast<int64_t>(std::ceil(hp / static_cast<double>(granularity)));
+  int64_t per_slice = (granules + n_slices - 1) / n_slices;
+  return static_cast<double>(per_slice) * n_slices * granularity;
 }
 
 }  // namespace
