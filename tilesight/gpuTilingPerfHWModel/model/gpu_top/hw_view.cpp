@@ -97,6 +97,9 @@ double HwView::sram_stage_share_blocks() const { return get_num("memory.sram.sta
 double HwView::sram_capacity_for(const std::string& klass) const {
   return nb::cast<double>(cfg_.attr("sram_capacity_for")(klass));
 }
+double HwView::sram_capacity_bytes() const {
+  return nb::cast<double>(cfg_.attr("sram_capacity_bytes"));
+}
 bool HwView::sram_keeps_intermediates() const {
   return nb::cast<bool>(cfg_.attr("sram_keeps_intermediates"));
 }

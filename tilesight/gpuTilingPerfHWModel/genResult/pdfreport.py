@@ -13,7 +13,7 @@ from tilesight.gpuTilingPerfHWModel.genResult.timeline import steady_timeline
 
 FONT = "Helvetica"
 LANE_RGB = {"switch": "#6f8f6a", "tc": "#b4552d", "cuda": "#6b8f9c", "sfu": "#8a6fb0", "smem": "#5b9279",
-            "tmem": "#c2903a", "l1": "#2f7d54", "l2": "#4f7cac", "ddr": "#b3563a",
+            "tmem": "#c2903a", "l1": "#2f7d54", "l2": "#4f7cac", "ddr": "#b3563a", "dma": "#9c4a6b", "l2port": "#3f8f8f",
             "sram": "#7f9a52", "net": "#7a7a7a"}
 
 

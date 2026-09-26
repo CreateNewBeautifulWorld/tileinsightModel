@@ -48,8 +48,8 @@ def test_longer_output_needs_more_memory_fewer_requests():
 def test_detail_attributes_tensor():
     rep = run_model(KIMI, B300, RunConfig(phase="decode", batch=256, seq_len=8192, dp=8))
     det = rep.detail_breakdown()
-    assert next(iter(det)) == "ddr:load:expert_weight"
-    assert any(k.startswith("ddr:load:kv_cache") for k in det)
+    assert next(iter(det)) == "dma:load:expert_weight"     # weights stream in by DMA
+    assert any(k.startswith("dma:load:kv_cache") for k in det)
     # details refine the coarse limiter: totals agree
     assert abs(sum(det.values()) - sum(rep.limiter_breakdown().values())) < 1e-12
 
@@ -58,7 +58,7 @@ def test_naive_softmax_bound_on_scores_tensor():
     rc = RunConfig(phase="prefill", batch=1, seq_len=16384, tp=8, dp=1, attn_impl="naive")
     rep = run_model(ModelSpec.load("llama3_70b.hf"), B300, rc)
     sm = next(o for o in rep.ops if o.op.name.endswith("attn_softmax"))
-    assert sm.bottleneck_detail.startswith("ddr:") and ("scores" in sm.bottleneck_detail or "probs" in sm.bottleneck_detail)
+    assert sm.bottleneck_detail.startswith(("ddr:", "l2port:")) and ("scores" in sm.bottleneck_detail or "probs" in sm.bottleneck_detail)
 
 
 def test_register_limited_occupancy_on_hopper():
@@ -110,8 +110,8 @@ def test_timeline_reflects_the_bottleneck():
     tl = steady_timeline(k, B300)
     busy = {l: sum(i["lanes"].get(l, 0.0) for i in tl["steady"] if i["round"] == 0) for l in tl["lanes"]}
     top = max(busy, key=busy.get)
-    assert top == "ddr"                      # KV streaming dominates decode
-    assert busy["ddr"] / tl["round_s"] > 0.7
+    assert top == "dma"                      # KV streaming (DMA'd from HBM) dominates decode
+    assert busy["dma"] / tl["round_s"] > 0.7
 
 
 def test_timeline_cycles_and_trace_text():

@@ -13,6 +13,7 @@ RESOURCE_CLASS = {
     "sram": "on-chip buffer", "switch": "on-chip buffer:switch",
     "tc": "compute:tensor-core", "cuda": "compute:cuda-core", "sfu": "compute:sfu",
     "smem": "on-chip:smem", "tmem": "on-chip:tmem", "l2": "cache:L2", "ddr": "memory:DDR/HBM",
+    "dma": "memory:DMA engines", "l2port": "memory:L2 ports->HBM",
     "net": "interconnect", "launch": "launch-overhead",
 }
 

@@ -39,7 +39,7 @@ def test_naive_prefill_slower_ddr_bound_and_memory_hungry():
     assert _attn_time(n) > 2 * _attn_time(f)
     assert n.memory.activations_GB > 10 * f.memory.activations_GB
     lim = {o.op.name.split(".")[-1]: o.bottleneck for o in n.ops}
-    assert lim["attn_softmax"] == "ddr"
+    assert lim["attn_softmax"] in ("ddr", "l2port")    # scores/probs round-trip HBM via the L2 ports
 
 
 def test_per_block_impl_override():

@@ -55,7 +55,9 @@ def test_gemm_ddr_bound_matches_bandwidth_formula():
     ks = _core.lower_gemm(HW, "g", 1, N, K, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
                           tile=_core.GemmTile(bm=64, bn=64, bk=128))
     t = sum(_core.evaluate(HW, k).time_s for k in ks)
-    ideal = N * K / (8.0e12 * 0.88)
+    # weights are a matrix operand: DMA'd, so the ceiling is min(HBM, the DMA engines)
+    lanes = {l.name: l for l in HW.lanes()}
+    ideal = N * K / min(8.0e12 * 0.88, lanes["dma"].total_rate)
     assert ideal <= t < 1.6 * ideal
 
 
@@ -70,8 +72,10 @@ def test_gemm_tc_bound_matches_flop_formula():
 
 
 @pytest.mark.parametrize("phase,batch,expected_s,limiter", [
-    ("decode", 64, 0.029989698473958243, "ddr"),
-    ("prefill", 8, 0.16973208393601716, "tc"),
+    # re-pinned for the DMA / L2-port HBM paths: decode is bound by the 16 DMA engines
+    # (3.9 TB/s < HBM), prefill by elementwise activations through the L2 ports' outstanding entries
+    ("decode", 64, 0.044572561988997145, "dma"),
+    ("prefill", 8, 0.27284704274172206, "l2port"),
 ])
 def test_kimi_step_time_regression(phase, batch, expected_s, limiter):
     """Pins the whole-model step time for a known config, so a change to the engine, the

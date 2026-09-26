@@ -253,7 +253,7 @@ def with_conflict_penalty(cur_gpu_config: HardwareSpec, report: dict) -> Hardwar
 
 
 def kernel_addr_fn(cur_gpu_config: HardwareSpec, M: int, N: int, K: int, tile, a_bytes: float, b_bytes: float,
-                   base: int = 0, layout_a: str = "row", layout_b: str = "row",
+                   base: int = 0x80000000, layout_a: str = "row", layout_b: str = "row",
                    c_bytes: float = 2.0, block_m: int = 0, block_n: int = 0):
     """Address of the tile each action touches, for a representative block.
 

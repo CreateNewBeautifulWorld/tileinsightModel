@@ -27,7 +27,7 @@ def test_decode_report_runs_and_is_ddr_dominated():
     rep = run_model(ModelSpec.load("kimi_k2.hf"), HardwareSpec.load("b300"),
                     RunConfig(phase="decode", batch=128, seq_len=4096, dp=8))
     mix = rep.limiter_breakdown()
-    assert next(iter(mix)) == "ddr"
+    assert next(iter(mix)) in ("ddr", "dma")      # HBM or the DMA engines feeding from it
     assert rep.memory.fits
 
 

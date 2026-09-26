@@ -31,8 +31,8 @@ efficiency:
 
 memory:
   queueing: {coef: 0.5, max_factor: 3.0}   # [calib] M/D/1-style latency inflation
-  outstanding: {per_sm_lines: 256, dma_per_engine_lines: 1024}   # [calib] MSHR-style limit
-  dma: {engines: 8, destination: smem}     # [calib]
+  outstanding: {per_sm_lines: 256}   # [calib] MSHR-style limit
+  dma: {engines: 16, destination: smem}    # [calib] DMA ports per GPU (x memory.dma.port_bytes x clock)
   l1: {owner: sm, capacity_KB: 64, smem_carveout_KB: 0, cluster_size: 1, cache_global_loads: true, capacity_derate: 1.0, bytes_per_clk: 128, latency_cycles: 30, policy: lru}   # derate 1.0 = no loss by default
   interleave_KB: 1       # [calib]
   addressing:            # dump with `tilesight addrmap`

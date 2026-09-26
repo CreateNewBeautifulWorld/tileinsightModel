@@ -52,7 +52,8 @@ struct Partition {
 SimResult simulate(const std::vector<int64_t>& keys, const std::vector<int64_t>& addrs,
                     const std::vector<double>& sizes, const std::vector<int>& streams, int n_streams,
                     double capacity_bytes, int n_partitions, const std::vector<int>& part_of_addr,
-                    const std::string& policy, bool page_fill) {
+                    const std::string& policy, bool page_fill,
+                    const std::vector<char>* fill_mask) {
   n_partitions = std::max(1, n_partitions);
   std::vector<Partition> parts(n_partitions);
   int64_t cap_each = static_cast<int64_t>(capacity_bytes) / n_partitions;
@@ -61,19 +62,24 @@ SimResult simulate(const std::vector<int64_t>& keys, const std::vector<int64_t>&
   SimResult res;
   res.misses.assign(n_streams, 0.0);
   res.accesses.assign(n_streams, 0);
+  res.miss_bytes.assign(n_streams, 0.0);
   int64_t total = 0;
   for (size_t i = 0; i < keys.size(); ++i) {
     int st = streams[i];
     res.accesses[st] += 1;
     ++total;
     int part = ((part_of_addr[i] % n_partitions) + n_partitions) % n_partitions;
-    if (!page_fill) {
-      if (!parts[part].access(keys[i], static_cast<int64_t>(sizes[i]), policy)) res.misses[st] += 1.0;
+    if (!page_fill || (fill_mask && !(*fill_mask)[i])) {
+      if (!parts[part].access(keys[i], static_cast<int64_t>(sizes[i]), policy)) {
+        res.misses[st] += 1.0;
+        res.miss_bytes[st] += sizes[i];
+      }
       continue;
     }
     int64_t shard = static_cast<int64_t>(sizes[i]) / n_partitions;
     if (parts[part].access(keys[i], shard, policy)) continue;
     res.misses[st] += 1.0;
+    res.miss_bytes[st] += sizes[i];
     for (int p = 0; p < n_partitions; ++p)
       if (p != part) parts[p].access(keys[i], shard, policy);
   }

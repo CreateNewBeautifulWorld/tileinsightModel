@@ -23,7 +23,9 @@ def test_ddr_bound_decode_gemm_hits_bandwidth():
     ks = lower_gemm(HW, "g", 1, N, K, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
                     tile=TileConfig(bm=64, bn=64, bk=128))
     t = sum(evaluate(k, HW).time_s for k in ks)
-    ideal = N * K / (8.0e12 * 0.88)
+    # weights are a matrix operand: DMA'd, so the ceiling is min(HBM, the DMA engines)
+    lanes = {l.name: l for l in HW.lanes()}
+    ideal = N * K / min(8.0e12 * 0.88, lanes["dma"].total_rate)
     assert ideal <= t < 1.6 * ideal
 
 

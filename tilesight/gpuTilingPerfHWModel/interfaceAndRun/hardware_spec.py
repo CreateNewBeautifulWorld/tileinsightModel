@@ -49,7 +49,7 @@ DOMAINS = ("shader_slice", "onchip_buffer", "memory")
 LANE_DOMAIN = {"tc": "shader_slice", "cuda": "shader_slice", "sfu": "shader_slice",
                "smem": "shader_slice", "tmem": "shader_slice", "l1": "shader_slice",
                "sram": "onchip_buffer", "switch": "onchip_buffer",
-               "l2": "memory", "ddr": "memory", "net": "memory"}
+               "l2": "memory", "ddr": "memory", "dma": "memory", "l2port": "memory", "net": "memory"}
 
 
 def lane_domain(name: str) -> str:
@@ -387,26 +387,51 @@ class HardwareSpec:
             return min(configured, blocks * ports * bpc * self.clock_hz)
         return configured
 
-    def dma_engine_limited_rate(self, configured: float) -> float:
-        """Cap DDR bandwidth by how many DMA engines can have a hugepage fetch in flight at once.
+    def dma_rate(self) -> float:
+        """DMA lane: `memory.dma.engines x memory.dma.port_bytes x clock`. A DMA moves a contiguous
+        range into space reserved up front, so no outstanding-entry limit applies. inf when either
+        knob is 0 (no DMA ceiling of its own; HBM still caps it via the shared `ddr` lane)."""
+        engines = float(self.get("memory.dma.engines") or 0)
+        width = float(self.get("memory.dma.port_bytes") or 0)
+        if engines <= 0 or width <= 0:
+            return math.inf
+        return engines * width * self.clock_hz
 
-        Little's law again, like `outstanding_cap`, but for the discrete unit a configured
-        `memory.dma.hugepage_KB` actually moves per operation, instead of a generic cache line:
-        `memory.dma.engines x memory.outstanding.dma_per_engine_lines x hugepage_bytes / DDR
-        round-trip latency`. A DMA engine is not tied to a memory slice — it can move data from
-        any HBM channel to any slice — so `engines` is a flat GPU-wide count, not per-slice.
-        Returns `configured` unchanged when no hugepage is configured (nothing discrete to count
-        "in flight" of — the generic per-SM `outstanding_cap` already covers that case) or either
-        knob is left at its default zero, so this is opt-in and changes no existing preset."""
-        hp = float(self.get("memory.dma.hugepage_KB") or 0) * 1024
-        lines = float(self.get("memory.outstanding.dma_per_engine_lines") or 0)
-        if hp <= 0 or lines <= 0:
-            return configured
-        engines = float(self.get("memory.dma.engines") or 1)
-        lat = self.unit_latency_s("ddr")
-        if engines <= 0 or lat <= 0:
-            return configured
-        return min(configured, engines * lines * hp / lat)
+    def l2_op_bytes(self) -> int:
+        """memory.l2.op_bytes, checked against the L2 interleave granularity it has to tile."""
+        op = int(self.get("memory.l2.op_bytes") or 0)
+        gran = self.get("memory.interleave_KB")
+        addr = self.get("memory.addressing.l2") or {}
+        if isinstance(addr, dict) and addr.get("granularity_KB") is not None:
+            gran = addr["granularity_KB"]
+        gran_b = int(round(float(gran) * 1024))
+        if op <= 0 or gran_b % op != 0:
+            raise ValueError(f"memory.l2.op_bytes ({op}) must divide the L2 interleave granularity ({gran_b} B)")
+        return op
+
+    def l2port_rate(self) -> float:
+        """L2-port HBM lane (reads and writes share it): the smaller of the port width
+        (`ports x ddr_port_bytes_per_clk x clock`) and Little's law over the outstanding entries:
+        an op_bytes request takes ceil(op_bytes / width) entries for ddr_entry_cycles, so
+        `ports x floor(entries / per_request) x op_bytes / (ddr_entry_cycles / clock)`."""
+        ports = int(self.get("memory.l2.ddr_ports") or 0)
+        if ports <= 0:
+            addr = self.get("memory.addressing.l2") or {}
+            ports = int(addr.get("ports", 0)) if isinstance(addr, dict) else 0
+            if ports <= 0:
+                ports = int(self.get("memory.l2.slices") or 0) or max(1, int(self.raw.get("dies", 1))) * 8
+        width = float(self.get("memory.l2.ddr_port_bytes_per_clk") or 0)
+        if width <= 0:
+            return math.inf
+        rate = ports * width * self.clock_hz
+        entries = int(self.get("memory.l2.ddr_outstanding") or 0)
+        cycles = float(self.get("memory.l2.ddr_entry_cycles") or 0)
+        if entries > 0 and cycles > 0:
+            op = self.l2_op_bytes()
+            per_req = math.ceil(op / width)
+            reqs = entries // per_req
+            rate = min(rate, ports * reqs * op * self.clock_hz / cycles)
+        return rate
 
     def outstanding_cap(self, level: str) -> float:
         """Little's law: one SM cannot pull more than in-flight bytes / latency.
@@ -446,7 +471,6 @@ class HardwareSpec:
             # no L2 level: the lane is just the memory-slice ports, so it must not throttle
             # traffic that now goes straight to HBM (which pays the HBM latency instead)
             rate = max(self.block_limited_rate("l2", ddr_rate), ddr_rate)
-            rate = self.dma_engine_limited_rate(rate)
         else:
             rate = self.block_limited_rate("l2", l2["bandwidth_TBps"] * 1e12 * self.eff("l2"))
         out.append(Lane("l2", True, rate, min(cap, self.outstanding_cap("l2")), "memory", "global"))
@@ -463,9 +487,13 @@ class HardwareSpec:
                                 self.get("memory.l1.cluster_size", 1))),
                             "onchip_buffer", "global"))
         ddr = self.get("memory.ddr")
-        ddr_final_rate = self.dma_engine_limited_rate(
-            self.block_limited_rate("ddr", ddr["bandwidth_TBps"] * 1e12 * self.eff("ddr")))
+        # HBM is one pool both engines draw from (`ddr`); each engine also has its own ceiling:
+        # the DMA ports (`dma`, matrix operands) and the L2 ports' outstanding entries (`l2port`,
+        # everything else plus write-back).
+        ddr_final_rate = self.block_limited_rate("ddr", ddr["bandwidth_TBps"] * 1e12 * self.eff("ddr"))
         out.append(Lane("ddr", True, ddr_final_rate, min(cap, self.outstanding_cap("ddr")), "memory", "global"))
+        out.append(Lane("dma", True, self.dma_rate(), inf, "memory", "global"))
+        out.append(Lane("l2port", True, self.l2port_rate(), inf, "memory", "global"))
         return out
 
     def __repr__(self) -> str:

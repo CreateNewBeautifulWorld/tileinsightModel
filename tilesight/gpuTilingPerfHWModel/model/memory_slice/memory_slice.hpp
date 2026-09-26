@@ -20,6 +20,6 @@ cache::SimResult simulate_l2(const std::vector<int64_t>& keys, const std::vector
                              const std::vector<double>& sizes, const std::vector<int>& streams,
                              int n_streams, double l2_capacity_bytes, int n_partitions,
                              const cache::AddrCfg& l2_addr_cfg, const std::string& policy,
-                             bool page_fill = false);
+                             bool page_fill = false, const std::vector<char>* fill_mask = nullptr);
 
 }  // namespace tilesight::memory_slice

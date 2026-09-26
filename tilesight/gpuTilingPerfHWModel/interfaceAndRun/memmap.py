@@ -88,7 +88,7 @@ class MemoryMap:
         return "\n".join(L)
 
 
-def build_memory_map(model: ModelSpec, rc: RunConfig, base: int = 0) -> MemoryMap:
+def build_memory_map(model: ModelSpec, rc: RunConfig, base: int = 0x80000000) -> MemoryMap:
     """Allocate every tensor this GPU holds, in execution order."""
     mm = MemoryMap(base=base)
     cur = base

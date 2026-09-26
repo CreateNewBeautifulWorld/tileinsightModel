@@ -45,9 +45,8 @@ memory:
                          # bandwidth: BW_per_SM <= lines x line_bytes / latency, so a level with
                          # a long latency needs many lines in flight to reach its peak.
     per_sm_lines: 512    # [calib] cache lines in flight per SM
-    dma_per_engine_lines: 1024   # [calib]
   dma:
-    engines: 8           # [calib] copy engines; a DMA can move data from any HBM channel to any
+    engines: 16          # [calib] DMA ports (copy engines); a DMA can move data from any HBM channel to any
                          # memory slice, so this is a flat GPU-wide count, not per-slice
     destination: smem    # smem | l2 | bypass — where the engine drops the data
   l1:

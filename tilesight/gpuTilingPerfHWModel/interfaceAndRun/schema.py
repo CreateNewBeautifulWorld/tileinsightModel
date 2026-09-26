@@ -129,6 +129,22 @@ FIELDS: tuple[Field, ...] = (
     F("memory.l2.ports_per_block", "int", "count", 1, "calib", "memory.l2", "Ports per block"),
     F("memory.l2.bytes_per_clk_per_port", "float", "B/clk", 0, "calib", "memory.l2",
       "Port width; blocks x ports x width x clock caps the level"),
+    F("memory.l2.op_bytes", "int", "B", 256, "calib", "memory.l2",
+      "L2 operation = eviction granularity; must divide the L2 interleave granularity "
+      "(memory.addressing.l2.granularity_KB). An L2-port fetch is rounded up to it"),
+    F("memory.l2.ddr_ports", "int", "count", 0, "calib", "memory.l2",
+      "L2 ports towards HBM (0 = one per memory.addressing.l2 port)"),
+    F("memory.l2.ddr_port_bytes_per_clk", "float", "B/clk", 64, "calib", "memory.l2",
+      "Width of one L2 port towards HBM"),
+    F("memory.l2.ddr_outstanding", "int", "entries", 128, "calib", "memory.l2",
+      "Outstanding-request entries per L2 port, shared by reads and writes. One entry covers "
+      "ddr_port_bytes_per_clk bytes, so an op_bytes request takes ceil(op_bytes / width) entries "
+      "(256 B at 64 B -> 4) and holds them ddr_entry_cycles. Little's law then caps the L2-port "
+      "HBM path at ports x floor(entries / per-request) x op_bytes / ddr_entry_cycles (0 = no cap)"),
+    F("memory.l2.ddr_entry_cycles", "float", "cycles", 300, "calib", "memory.l2",
+      "How long one L2 request holds its outstanding entries (round trip to HBM)"),
+    F("memory.l2.ddr_fill_latency_cycles", "float", "cycles", 16, "calib", "memory.l2",
+      "Latency from an L2 port seeing one ddr_port_bytes_per_clk beat to it sitting in L2"),
     F("memory.l2.line_bytes", "int", "B", 128, "spec", "memory.l2", "Cache line (used by the Little's-law cap)"),
     F("memory.l2.sector_bytes", "int", "B", 32, "spec", "memory.l2", "Sector a miss actually fetches"),
     F("memory.l2.apply_conflict_penalty", "bool", "", False, "policy", "memory.l2",
@@ -255,6 +271,9 @@ FIELDS: tuple[Field, ...] = (
     # ---------------------------------------------------------------- addressing
     F("memory.interleave_KB", "float", "KB", 2, "calib", "memory.addressing",
       "Default interleave granularity when a side does not set its own"),
+    F("memory.addressing.base", "int", "B", 0x80000000, "calib", "memory.addressing",
+      "Physical address the first tensor starts at (default 0x8000_0000, like a real DRAM aperture); "
+      "the GEMM / attention traces, the memory map and the CLI address dumps lay tensors out from it"),
     F("memory.addressing.addr_bits", "int", "bits", 48, "spec", "memory.addressing", "Physical address width"),
     F("memory.addressing.l2", "map", "", None, "calib", "memory.addressing",
       "{ports, mode: interleave|range|hash, granularity_KB} for L2 slices / load ports"),
@@ -265,30 +284,39 @@ FIELDS: tuple[Field, ...] = (
     F("memory.outstanding.per_sm_lines", "int", "lines", 0, "calib", "memory.parallelism",
       "Cache lines in flight per SM (MSHR-style). Little's law: BW_per_SM <= lines x line / latency. "
       "0 = unlimited"),
-    F("memory.outstanding.dma_per_engine_lines", "int", "lines", 0, "calib", "memory.parallelism",
-      "In-flight hugepage fetches per DMA engine (0 = no cap). With memory.dma.hugepage_KB also "
-      "set, caps DDR bandwidth via Little's law: engines x this x hugepage_bytes / DDR latency "
-      "(HardwareSpec.dma_engine_limited_rate) -- the discrete-transfer analogue of "
-      "outstanding_cap's generic per-SM cache-line limit"),
     F("memory.queueing.coef", "float", "", 0.0, "loss", "memory.parallelism",
       "M/D/1-style latency inflation 1 + coef*u/(1-u) as a lane saturates. DEFAULT 0 = no loss"),
     F("memory.queueing.max_factor", "float", "", 3.0, "loss", "memory.parallelism", "Cap on that inflation"),
 
     # ---------------------------------------------------------------- DMA
-    F("memory.dma.engines", "int", "count", 1, "spec", "memory.dma",
-      "Copy engines; a DMA can move data from any HBM channel to any memory slice, so this is a "
-      "flat GPU-wide count, not per-slice. Feeds dma_engine_limited_rate's concurrency cap (with "
-      "hugepage_KB and outstanding.dma_per_engine_lines also set)"),
+    F("memory.dma.engines", "int", "count", 16, "spec", "memory.dma",
+      "DMA ports (copy engines) per GPU. Not tied to a memory slice: any engine moves data from any "
+      "HBM channel to any slice. Together with port_bytes they cap the DMA lane at "
+      "engines x port_bytes x clock; a DMA moves a contiguous range into space reserved up front "
+      "in the buffer/L2, so it needs no outstanding-request entries"),
+    F("memory.dma.port_bytes", "int", "B", 128, "spec", "memory.dma",
+      "Width of one DMA port (bytes per clock) and the granularity of a DMA transfer "
+      "(dma_smart sizes transfers in multiples of it)"),
+    F("memory.dma.fill_latency_cycles", "float", "cycles", 8, "calib", "memory.dma",
+      "Latency from a DMA port seeing one port_bytes beat to it sitting in the buffer / L2"),
     F("memory.dma.destination", "str", "", "smem", "policy", "memory.dma",
-      "Where a DMA drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass"),
-    F("memory.dma.hugepage_KB", "float", "KB", 0, "calib", "memory.dma",
-      "Fixed size of one DMA operation, matching the 2 MB huge page: a DMA moves exactly one "
-      "hugepage, never less (0 = off: tile-granular L2 and an occupancy proxy for slice spread). "
-      "Splits evenly across every memory slice by construction; if it doesn't divide evenly by "
+      "Where a DMA load path (TMA) drops data: smem (through the L2 datapath) | l2 (fills L2) | bypass"),
+    F("memory.dma.hugepage_KB", "float", "KB", 2048, "calib", "memory.dma",
+      "DMA page, matching the 2 MB huge page: in dma_page mode every miss of a matrix operand "
+      "(GEMM A/B, attention K/V) fetches one whole page; in dma_smart mode it is the largest "
+      "transfer. Splits evenly across every memory slice; if it doesn't divide evenly by "
       "memory.addressing.l2's granularity x port count (e.g. 2048 over 12 ports), it is padded up "
       "to what the fullest slice would get. The L2 and shared-buffer simulations then hold pages, "
-      "one shard per slice, refilled into every slice on a miss (GEMM A/B, attention K/V); L1 "
-      "stays tile-granular"),
+      "one shard per slice, refilled into every slice on a miss; L1 stays tile-granular. "
+      "0 = no pages (tile-granular)"),
+    F("memory.dma.fetch_mode", "str", "", "auto", "policy", "memory.dma",
+      "How matrix operands (GEMM A/B, attention K/V) come in from HBM: dma_page (whole pages by "
+      "DMA) | dma_page_tail_l2 (whole pages by DMA, the partial page at each end of a block's "
+      "needed range through the L2 ports) | l2_port (everything through the L2 ports, tile "
+      "rounded up to memory.l2.op_bytes) | dma_smart (DMA sized to the need: <= the page, <= the "
+      "block's needed range, and small enough that one transfer per concurrent stream fits the "
+      "destination, in multiples of port_bytes) | auto (dma_page when the DMA lands in a shared "
+      "on-chip buffer that holds one page per concurrent stream, dma_smart otherwise). Everything else (Q, activations, stores) always uses the L2 ports"),
 
     # ---------------------------------------------------------------- load paths
     F("load_paths", "map", "", REQUIRED, "spec", "load_paths",

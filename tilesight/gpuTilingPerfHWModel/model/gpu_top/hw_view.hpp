@@ -72,6 +72,7 @@ class HwView {
   bool sram_prefetch() const;
   double sram_stage_share_blocks() const;
   double sram_capacity_for(const std::string& klass) const;
+  double sram_capacity_bytes() const;
   bool sram_keeps_intermediates() const;
 
   double ddr_bandwidth_Bps() const;

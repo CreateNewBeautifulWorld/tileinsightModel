@@ -84,7 +84,7 @@ def main(argv=None):
     kp.add_argument("--unit", default="us", choices=["us", "cyc"], help="gantt time unit")
     kp.add_argument("--trace-out", dest="trace_out", help="write the full text trace to this file")
     kp.add_argument("--csv-out", dest="csv_out", help="write a per-cycle CSV (one row per cycle, one column per unit)")
-    kp.add_argument("--base", default="0x0", help="base address of the first tensor")
+    kp.add_argument("--base", default="0x80000000", help="base address of the first tensor")
     kp.add_argument("--addr", action="store_true",
                     help="tile-granularity address analysis: how the wave's tiles spread over L2 slices / HBM ports")
     kp.add_argument("--layout-a", dest="layout_a", default="row",
@@ -122,7 +122,7 @@ def main(argv=None):
     ap2.add_argument("--gpu-tiling-perf-hw-model", dest="cur_gpu_config", default="b300")
     ap2.add_argument("--set", action="append", help="override, e.g. memory.addressing.l2.mode=hash")
     ap2.add_argument("--rows", type=int, default=8)
-    ap2.add_argument("--base", default="0x0")
+    ap2.add_argument("--base", default="0x80000000")
     ap2.add_argument("--decode", help="comma-separated addresses to decode")
     ap2.add_argument("--csv", help="write the full stripe/range table")
     ap2.add_argument("--side", default="both", choices=["l2", "ddr", "both"])
@@ -135,7 +135,7 @@ def main(argv=None):
     mp.add_argument("--seq", type=int, default=8192)
     mp.add_argument("--tp", type=int, default=1)
     mp.add_argument("--dp", type=int, default=8)
-    mp.add_argument("--base", default="0x0", help="base offset (hex or decimal)")
+    mp.add_argument("--base", default="0x80000000", help="base offset (hex or decimal)")
     mp.add_argument("--limit", type=int, default=40)
     mp.add_argument("--csv")
 

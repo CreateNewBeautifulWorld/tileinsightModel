@@ -1,6 +1,8 @@
 #include "gpu_top.hpp"
 
 #include <algorithm>
+#include <set>
+#include <stdexcept>
 #include <cmath>
 #include <map>
 #include <sstream>
@@ -72,12 +74,25 @@ cache::AddrCfg l2_addr_cfg(const HwView& hw) {
   return cfg;
 }
 
+// Physical address the first tensor starts at (memory.addressing.base, default 0x8000_0000).
+double addr_base(const HwView& hw) { return hw.get_num("memory.addressing.base", 2147483648.0); }
+
+// HBM bytes per load of one matrix operand, from plan_fetch below (set = false: no plan, the
+// load's own miss fraction goes through the L2 ports).
+// buffer_frac >= 0: the DMA destination is the on-chip buffer and `dma` already counts the
+// buffer's own misses; that fraction of the load's bytes is read out of the buffer.
+struct HbmFetch {
+  bool set = false;
+  double dma = 0.0, port = 0.0;
+  double buffer_frac = -1.0;
+};
+
 // gload: one tile load, routed shader-slice -> [L1] -> [buffer over the switch] -> memory slice.
 // Mirrors kernels/gemm.py `gload`.
 TraceAction gload(const HwView& hw, const std::string& name, double nbytes, double miss,
                   const std::string& load_path, const std::vector<int>& deps,
                   bool has_sram_miss, double sram_miss, bool has_l1_miss, double l1_miss,
-                  double slice_frac = 1.0, double hugepage = 0.0) {
+                  double slice_frac = 1.0, const HbmFetch& fetch = HbmFetch{}) {
   double l1_m = 1.0;
   std::map<std::string, double> work;
   if (has_l1_miss && hw.l1_capacity_bytes() > 0) {
@@ -88,7 +103,12 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
 
   bool has_sram = hw.has_sram();
   double from_buffer = 0.0;
-  if (has_sram) {
+  bool dma_to_buffer = has_sram && fetch.set && fetch.buffer_frac >= 0;
+  if (dma_to_buffer) {
+    from_buffer = fetch.buffer_frac;
+    work["sram"] = after_l1 * from_buffer;
+    work["switch"] = after_l1 * from_buffer;
+  } else if (has_sram) {
     from_buffer = on_chip_buffer::route_from_buffer(true, miss, has_sram_miss, sram_miss, hw.sram_costream(),
                                                      hw.sram_bandwidth_Bps(), hw.ddr_bandwidth_Bps());
     work["sram"] = after_l1 * from_buffer;
@@ -96,14 +116,15 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
   }
   double to_memory = after_l1 * (1.0 - from_buffer);
   work["l2"] = to_memory;
-  // With a DMA hugepage configured (and `miss` coming from a hugepage-keyed L2 simulation, see
-  // l2_addr_cfg's caller), a miss means a whole hugepage was fetched, not just this tile's bytes
-  // — that is the point of the hugepage/huge-page-DMA model, and it is `miss` itself, not this
-  // multiplication, that already amortizes the rare full-page fetch over the many hits between
-  // them. Without a hugepage configured, this is the plain "miss fraction of this tile" case.
-  // Either way, whatever fraction the on-chip buffer already answered never reaches HBM at all.
-  work["ddr"] = hugepage > 0 ? miss * hugepage * (1.0 - from_buffer) : to_memory * miss;
-
+  // HBM leg. With a fetch plan (matrix operands: GEMM A/B, attention K/V), `fetch` already holds
+  // the real HBM bytes per load from the fetch-atom-keyed L2 simulation (a DMA page / smart chunk
+  // or an op_bytes-rounded tile on a miss, amortized over the hits in between), split into what
+  // the DMA engines move and what the L2 ports fetch. Without one (Q, activations, elementwise)
+  // it is the plain "miss fraction of this tile", fetched by the L2 ports. Either way, whatever
+  // the on-chip buffer already answered never reaches HBM at all.
+  double keep = dma_to_buffer ? 1.0 : 1.0 - from_buffer;
+  double dma_b = fetch.set ? fetch.dma * keep : 0.0;
+  double port_b = fetch.set ? fetch.port * keep : to_memory * miss;
   double lat = 0.0;
   for (const auto& [path, frac] : parse_path_split(load_path)) {
     std::string real = hw.resolve_path(path);
@@ -122,19 +143,31 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
       work["smem"] = (work.count("smem") ? work["smem"] : 0.0) + hw.smem_time_per_sm(nbytes * frac);
   }
   work["l2"] = std::max(0.0, work["l2"]);
-  // The L2 leg is the L2 port's own bandwidth (every access, hit or miss) and always pays the
-  // occupancy-derived slice-spread proxy. The DDR leg is a genuine HBM fetch: with a hugepage
-  // configured, `miss * hugepage` above already accounts for full slice spread by construction,
-  // so it does not also pay the (redundant) occupancy proxy; without one, it does.
+  // The L2 leg (every access, hit or miss) and the L2-port HBM leg pay the occupancy-derived
+  // slice-spread proxy. A DMA page/chunk spans every slice by construction, so it does not.
   if (slice_frac < 1.0) {
     work["l2"] /= slice_frac;
-    if (hugepage <= 0) work["ddr"] /= slice_frac;
+    port_b /= slice_frac;
   }
+  // HBM bandwidth is one pool shared by both paths (`ddr`); each path also has its own ceiling:
+  // the DMA engines (`dma`) and the L2 ports' outstanding-entry-limited fetch rate (`l2port`).
+  work["dma"] = dma_b;
+  work["l2port"] = port_b;
+  work["ddr"] = dma_b + port_b;
 
   double buf_lat = has_sram ? hw.sram_latency_ns() * 1e-9 : 0.0;
   bool has_l2 = hw.l2_capacity_bytes() > 0;
   double mem_lat = memory_slice::mem_latency_s(hw.get_num("memory.l2.latency_ns", 0.0),
                                                hw.get_num("memory.ddr.latency_ns", 0.0), miss, has_l2);
+  // Fill latency of the path a miss comes back on: a DMA beat lands in the buffer/L2 in
+  // memory.dma.fill_latency_cycles, an L2-port beat in memory.l2.ddr_fill_latency_cycles.
+  {
+    double tot = dma_b + port_b;
+    double dma_share = tot > 0 ? dma_b / tot : 0.0;
+    double fill_cyc = dma_share * hw.get_num("memory.dma.fill_latency_cycles", 0.0) +
+                      (1.0 - dma_share) * hw.get_num("memory.l2.ddr_fill_latency_cycles", 0.0);
+    mem_lat += miss * fill_cyc / hw.clock_hz();
+  }
   lat += from_buffer * buf_lat + (1.0 - from_buffer) * mem_lat;
   if (has_sram && hw.sram_prefetch()) lat *= std::max(0.0, 1.0 - from_buffer);
 
@@ -146,16 +179,20 @@ TraceAction gload(const HwView& hw, const std::string& name, double nbytes, doub
   return a;
 }
 
+// gstore: write-back to HBM. A matrix output (GEMM C, attention O: a contiguous tile) is written
+// by the DMA engines, like matrix loads; everything else (elementwise outputs, split partials)
+// through the L2 ports, whose outstanding entries reads and writes share.
 TraceAction gstore(const std::string& name, double nbytes, const std::vector<int>& deps, double ddr_frac,
-                   double sram_frac, double slice_frac = 1.0) {
+                   double sram_frac, double slice_frac = 1.0, bool by_dma = false) {
   TraceAction a;
   a.name = name;
   a.work["l2"] = nbytes;
   a.work["ddr"] = nbytes * ddr_frac;
   if (slice_frac < 1.0) {
     a.work["l2"] /= slice_frac;
-    a.work["ddr"] /= slice_frac;
+    if (!by_dma) a.work["ddr"] /= slice_frac;
   }
+  a.work[by_dma ? "dma" : "l2port"] = a.work["ddr"];
   if (sram_frac != 0.0) a.work["sram"] = nbytes * sram_frac;
   a.deps = deps;
   return a;
@@ -178,6 +215,27 @@ double resident_frac(const HwView& hw, double footprint_bytes, const std::string
   double fp_override = has_override ? nb::cast<double>(o) : 0.0;
   double cap = hw.sram_capacity_for(klass);
   return on_chip_buffer::resident_frac(true, has_override, fp_override, cap, footprint_bytes);
+}
+
+// Buffer capacity one kernel's own access trace competes for. A shared buffer (no alloc/pin) is
+// split across tensor classes by footprint only for what stays resident *between* kernels
+// (resident_frac); while a kernel runs, the trace replays from cold and its streams are the only
+// ones being touched, so LRU would give them the whole buffer. A static alloc/pin share is a
+// dedicated carve-out and stays the class's share.
+double trace_buffer_cap(const HwView& hw, const std::string& klass) {
+  bool static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
+  return static_alloc ? hw.sram_capacity_for(klass) : hw.sram_capacity_bytes();
+}
+
+// The on-chip buffer as the DMA destination: DMA'd pages/chunks land there (not in L2) and are
+// read out of it, so plan_fetch simulates them in the buffer. Only for a shared buffer used as a
+// plain cache: a static alloc/pin share (pre-staged, resident-by-assumption) and the explicit
+// `memory.sram.stage` model keep their closed-form treatment, with DMA traffic going via L2.
+double dma_buffer_cap(const HwView& hw, const std::string& klass) {
+  if (!hw.has_sram() || !hw.get("memory.sram.stage").is_none()) return 0.0;
+  bool static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
+  if (static_alloc) return 0.0;
+  return trace_buffer_cap(hw, klass);
 }
 
 // L2 and DDR are not one GPU-wide pool: each memory slice owns its own L2 port and HBM channel.
@@ -255,6 +313,220 @@ SimWindow sim_window(const HwView& hw, int64_t units, int64_t conc, int64_t iter
   return w;
 }
 
+// ---- fetch plan: how a matrix operand (GEMM A/B, attention K/V) comes in from HBM ----------
+// memory.dma.fetch_mode picks the atom a miss brings in, and which engine moves it:
+//   dma_page          every miss is one whole DMA page (memory.dma.hugepage_KB, padded), by DMA.
+//   dma_page_tail_l2  pages fully inside the stream's needed range by DMA; the partial page at
+//                     either end of that range comes through the L2 ports, one tile rounded up
+//                     to memory.l2.op_bytes at a time.
+//   l2_port           everything through the L2 ports, tile rounded up to memory.l2.op_bytes.
+//   dma_smart         DMA, but the transfer is sized to what is needed: the largest multiple of
+//                     memory.dma.port_bytes (128 B) that is <= the page, <= the stream's needed
+//                     range, and small enough that one chunk per concurrently-walked stream fits
+//                     the destination (L2, or the buffer when there is one) — never below a tile.
+//   auto (default)    dma_page when the DMA lands in a shared on-chip buffer that can hold one
+//                     page per concurrent stream (it keeps a page until its stream is done),
+//                     dma_smart otherwise.
+// Every access carries the stream's needed range [lo, hi) — the contiguous bytes that one block
+// walks over the K loop — which dma_smart and dma_page_tail_l2 need.
+struct FetchAcc {
+  int64_t addr, tkey;
+  double tile;
+  int op;
+  int64_t lo, hi;
+  bool wave0;  // part of the first wave: used to count concurrently-walked streams
+};
+
+struct FetchPlan {
+  std::string mode;
+  double page = 0.0;             // padded DMA page (0 = none)
+  std::vector<double> chunk;     // per op: bytes one DMA miss moves
+  std::vector<double> port_atom; // per op: bytes one L2-port miss moves
+  std::vector<double> miss;      // per op: fraction of loads that miss L2
+  std::vector<HbmFetch> fetch;   // per op: HBM bytes per load, by engine
+  std::vector<int64_t> keys;     // the L2 atoms (also replayed by the shared-buffer simulation)
+  std::vector<double> sizes;
+  std::vector<int> op_of;        // per access: operand index
+  int64_t streams_concurrent = 0;
+  bool via_buffer = false;       // DMA atoms simulated in the on-chip buffer instead of L2
+  double buffer_hit_rate = 1.0;
+  cache::SimResult sim;          // the L2 simulation
+};
+
+std::string fetch_mode(const HwView& hw) {
+  std::string m = hw.get_str("memory.dma.fetch_mode", "auto");
+  if (m == "auto") return m;
+  if (m != "dma_page" && m != "dma_page_tail_l2" && m != "l2_port" && m != "dma_smart")
+    throw std::invalid_argument("memory.dma.fetch_mode must be auto | dma_page | dma_page_tail_l2 | "
+                                "l2_port | dma_smart, got " + m);
+  return m;
+}
+
+// L2 operation (= eviction) granularity. It has to tile the L2 interleave stripe exactly, or one
+// L2 op would straddle two slices.
+int64_t l2_op_bytes(const HwView& hw, const cache::AddrCfg& cfg) {
+  int64_t op = static_cast<int64_t>(hw.get_num("memory.l2.op_bytes", 256.0));
+  if (op <= 0 || cfg.granularity % op != 0)
+    throw std::invalid_argument("memory.l2.op_bytes (" + std::to_string(op) +
+                                ") must divide the L2 interleave granularity (" +
+                                std::to_string(cfg.granularity) + " B)");
+  return op;
+}
+
+double round_up(double x, double unit) { return unit > 0 ? std::ceil(x / unit - 1e-9) * unit : x; }
+double round_down(double x, double unit) { return unit > 0 ? std::floor(x / unit + 1e-9) * unit : x; }
+
+FetchPlan plan_fetch(const HwView& hw, const std::vector<FetchAcc>& acc, int n_ops, const cache::AddrCfg& lmap,
+                     int n_part, double buffer_cap = 0.0) {
+  FetchPlan fp;
+  // where the DMA lands: the buffer when it is the DMA destination, else L2
+  double dest_cap = buffer_cap > 0 ? buffer_cap : hw.l2_capacity_bytes();
+  fp.mode = fetch_mode(hw);
+  int64_t op_b = l2_op_bytes(hw, lmap);
+  double dma_port = std::max(1.0, hw.get_num("memory.dma.port_bytes", 128.0));
+  fp.page = hugepage_bytes(hw, lmap);
+  // concurrently-walked streams (distinct needed ranges in the first wave), and the largest
+  // tile / needed range per operand
+  std::vector<double> tile(n_ops, 0.0), extent(n_ops, 0.0);
+  {
+    std::set<std::pair<int64_t, int64_t>> uniq;
+    for (const auto& a : acc) {
+      if (a.wave0) uniq.insert({a.lo, a.hi});
+      tile[a.op] = std::max(tile[a.op], a.tile);
+      extent[a.op] = std::max(extent[a.op], static_cast<double>(a.hi - a.lo));
+    }
+    fp.streams_concurrent = static_cast<int64_t>(uniq.size());
+  }
+  // auto: whole pages when they land in a buffer that holds one per concurrent stream (it keeps
+  // a page until its stream is done), else a smart DMA sized to fit
+  if (fp.mode == "auto")
+    fp.mode = (buffer_cap > 0 && fp.page > 0 &&
+               fp.page * static_cast<double>(std::max<int64_t>(1, fp.streams_concurrent)) <= buffer_cap)
+                  ? "dma_page" : "dma_smart";
+  bool page_mode = fp.mode == "dma_page" || fp.mode == "dma_page_tail_l2";
+  fp.chunk.assign(n_ops, 0.0);
+  fp.port_atom.assign(n_ops, 0.0);
+  for (int o = 0; o < n_ops; ++o) {
+    fp.port_atom[o] = round_up(tile[o], static_cast<double>(op_b));
+    double t128 = round_up(tile[o], dma_port);
+    if (page_mode && fp.page > 0) {
+      fp.chunk[o] = fp.page;
+    } else if (fp.mode == "dma_smart" && dest_cap > 0) {
+      double cap = fp.page > 0 ? fp.page : hw.get_num("memory.dma.hugepage_KB", 2048.0) * 1024.0;
+      cap = std::min(cap, round_up(extent[o], dma_port));
+      // two chunks per stream: the one being consumed and the next one the DMA is filling
+      if (fp.streams_concurrent > 0 && dest_cap > 0)
+        cap = std::min(cap, round_down(dest_cap / (2.0 * static_cast<double>(fp.streams_concurrent)), dma_port));
+      fp.chunk[o] = std::max(t128, cap);
+    } else {
+      fp.chunk[o] = t128;  // nowhere to keep a page (no L2/buffer): one tile per DMA
+    }
+  }
+  // atoms: key low 2 bits = kind (0 page/chunk by DMA, 2 tile by L2 port)
+  std::vector<int64_t> addrs;
+  std::vector<int> streams;
+  std::vector<char> fill;
+  fp.keys.reserve(acc.size());
+  for (const auto& a : acc) {
+    bool by_port = fp.mode == "l2_port";
+    if (fp.mode == "dma_page_tail_l2" && fp.page > 0) {
+      int64_t pg = static_cast<int64_t>(fp.page);
+      int64_t p0 = (a.addr / pg) * pg;
+      by_port = !(p0 >= a.lo && p0 + pg <= a.hi);
+    } else if (page_mode && fp.page <= 0) {
+      by_port = fp.mode == "dma_page_tail_l2";
+    }
+    int64_t key;
+    double size;
+    if (by_port) {
+      key = a.tkey * 4 + 2;
+      size = fp.port_atom[a.op];
+    } else if (fp.mode == "dma_smart") {
+      // a smart DMA starts where the stream needs data and stops where its need ends: chunks are
+      // aligned to the stream's own start, the last one trimmed to the remaining range
+      int64_t c = std::max<int64_t>(1, static_cast<int64_t>(fp.chunk[a.op]));
+      int64_t idx = (a.addr - a.lo) / c;
+      int64_t c0 = a.lo + idx * c;
+      key = (((a.lo / 128) * 1000003 + idx) * 8 + a.op) * 4 + 1;
+      size = std::max(round_up(a.tile, dma_port),
+                      round_up(static_cast<double>(std::min<int64_t>(c, a.hi - c0)), dma_port));
+    } else {
+      int64_t c = std::max<int64_t>(1, static_cast<int64_t>(fp.chunk[a.op]));
+      key = (a.addr / c) * 4;
+      size = fp.chunk[a.op];
+    }
+    fp.keys.push_back(key);
+    fp.sizes.push_back(size);
+    fp.op_of.push_back(a.op);
+    addrs.push_back(a.addr);
+    streams.push_back(a.op * 2 + (by_port ? 1 : 0));
+    fill.push_back(by_port ? 0 : 1);
+  }
+  // With a buffer as the DMA destination, the DMA atoms live in the buffer (one LRU over its
+  // whole capacity), not in L2; only the L2-port atoms go through the L2 simulation.
+  fp.via_buffer = buffer_cap > 0;
+  std::vector<double> buf_miss(n_ops, 0.0), buf_acc(n_ops, 0.0), buf_mb(n_ops, 0.0);
+  if (fp.via_buffer) {
+    std::vector<int64_t> bk, ba;
+    std::vector<double> bs;
+    std::vector<int> bst, one;
+    std::vector<int64_t> lk, la;
+    std::vector<double> ls;
+    std::vector<int> lst;
+    std::vector<char> lf;
+    for (size_t i = 0; i < fp.keys.size(); ++i) {
+      if (fill[i]) {
+        bk.push_back(fp.keys[i]); ba.push_back(addrs[i]); bs.push_back(fp.sizes[i]); bst.push_back(fp.op_of[i]);
+        one.push_back(0);
+      } else {
+        lk.push_back(fp.keys[i]); la.push_back(addrs[i]); ls.push_back(fp.sizes[i]); lst.push_back(streams[i]);
+        lf.push_back(0);
+      }
+    }
+    cache::SimResult br = cache::simulate(bk, ba, bs, bst, n_ops, buffer_cap, 1, one, "lru");
+    for (int o = 0; o < n_ops; ++o) {
+      buf_miss[o] = br.misses[o];
+      buf_mb[o] = br.miss_bytes[o];
+      buf_acc[o] = static_cast<double>(br.accesses[o]);
+    }
+    fp.buffer_hit_rate = br.hit_rate;
+    fp.sim = memory_slice::simulate_l2(lk, la, ls, lst, 2 * n_ops, hw.l2_capacity_bytes(), n_part, lmap,
+                                       hw.get_str("memory.l2.policy", "lru"), false, &lf);
+  } else {
+    fp.sim = memory_slice::simulate_l2(fp.keys, addrs, fp.sizes, streams, 2 * n_ops, hw.l2_capacity_bytes(), n_part,
+                                       lmap, hw.get_str("memory.l2.policy", "lru"), fp.mode != "l2_port", &fill);
+  }
+  fp.miss.assign(n_ops, 0.0);
+  fp.fetch.assign(n_ops, HbmFetch{});
+  for (int o = 0; o < n_ops; ++o) {
+    double m_port = fp.sim.misses[2 * o + 1];
+    double m_dma = fp.via_buffer ? buf_miss[o] : fp.sim.misses[2 * o];
+    double n_dma = fp.via_buffer ? buf_acc[o] : static_cast<double>(fp.sim.accesses[2 * o]);
+    double loads = n_dma + static_cast<double>(fp.sim.accesses[2 * o + 1]);
+    fp.fetch[o].set = true;
+    if (loads <= 0) continue;
+    fp.miss[o] = (m_dma + m_port) / loads;
+    fp.fetch[o].dma = (fp.via_buffer ? buf_mb[o] : fp.sim.miss_bytes[2 * o]) / loads;
+    fp.fetch[o].port = fp.sim.miss_bytes[2 * o + 1] / loads;
+    if (fp.via_buffer) fp.fetch[o].buffer_frac = n_dma / loads;
+  }
+  return fp;
+}
+
+void fetch_meta(nb::dict& meta, const FetchPlan& fp) {
+  meta["fetch_mode"] = fp.mode;
+  meta["dma_hugepage_bytes"] = fp.page;
+  meta["dma_chunk_bytes"] = fp.chunk;
+  meta["l2_port_atom_bytes"] = fp.port_atom;
+  meta["fetch_streams"] = fp.streams_concurrent;
+  meta["dma_to_buffer"] = fp.via_buffer;
+  if (fp.via_buffer) meta["buffer_hit_rate"] = fp.buffer_hit_rate;
+  std::vector<double> d, p;
+  for (const auto& f : fp.fetch) { d.push_back(f.dma); p.push_back(f.port); }
+  meta["hbm_dma_bytes_per_load"] = d;
+  meta["hbm_port_bytes_per_load"] = p;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------- occupancy
@@ -330,9 +602,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     share_a = std::max(1.0, std::min(share, static_cast<double>(nt)));
   }
 
-  // ---- L2 model: deterministic tile-level simulation over several waves --------------
+  // ---- L2 model: deterministic simulation of the fetch atoms over the whole kernel --------
   cache::AddrCfg lmap = l2_addr_cfg(hw);
-  double hp = hugepage_bytes(hw, lmap);
   double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
   int64_t conc = static_cast<int64_t>(hw.sms()) * resident;
   auto order_all = grouped_raster(mt, nt, t.swizzle);
@@ -344,11 +615,13 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   int64_t n_waves = win.waves;
   int64_t n_take = std::min<int64_t>(static_cast<int64_t>(full_order.size()), conc * n_waves);
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> order(full_order.begin(), full_order.begin() + n_take);
-  double a_base = 0, b_base = M * K * ab * batch;
-  // keys/sizes: the L2 (and shared-buffer) atom — a whole DMA hugepage when one is configured,
-  // else one tile. tkeys/tsizes: always one tile, for L1, which caches LSU loads, not DMA pages.
-  std::vector<int64_t> keys, tkeys, addrs;
-  std::vector<double> sizes, tsizes;
+  // Layout (tile-major, "hierarchy Z"): A is [batch][M-tile][K-tile], B is [batch][N-tile][K-tile]
+  // (K contiguous per N strip, like an nn.Linear weight [out][in]). So each block walks one
+  // contiguous range of A and one of B over its K loop: those are the streams a DMA can fetch.
+  double a_base = addr_base(hw), b_base = a_base + round_up(M * K * ab * batch, 4096.0);
+  std::vector<FetchAcc> facc;
+  std::vector<int64_t> tkeys, addrs;
+  std::vector<double> tsizes;
   std::vector<int> streams;
   int64_t ksteps = win.ksteps;
   for (int64_t w = 0; w < n_waves; ++w) {
@@ -356,26 +629,20 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     for (int64_t kk = 0; kk < ksteps; ++kk) {
       for (int64_t idx = lo; idx < hi; ++idx) {
         auto [b_, s_, m, n] = order[idx];
-        int64_t k = s_ * iters + kk;
-        int64_t a_addr = static_cast<int64_t>(a_base + ((b_ * mt + m) * kt + k) * a_tile);
-        int64_t b_addr = static_cast<int64_t>(b_base + ((b_ * kt + k) * nt + n) * b_tile);
+        int64_t k0 = s_ * iters, k1 = std::min<int64_t>(kt, k0 + iters);
+        int64_t k = k0 + kk;
+        if (k >= kt) continue;
+        int64_t a_row = static_cast<int64_t>(a_base + (b_ * mt + m) * kt * a_tile);
+        int64_t b_row = static_cast<int64_t>(b_base + (b_ * nt + n) * kt * b_tile);
+        int64_t a_addr = a_row + static_cast<int64_t>(k * a_tile);
+        int64_t b_addr = b_row + static_cast<int64_t>(k * b_tile);
         int64_t a_key = ((b_ * 4096 + m) * 65536 + k) * 2, b_key = ((b_ * 4096 + n) * 65536 + k) * 2 + 1;
-        // With a hugepage configured, key the cache by hugepage index (not by loop index) so a
-        // second access landing in an already-resident hugepage is a real hit in the simulation
-        // — that is what lets miss_fraction() mean "how often a whole new hugepage is needed",
-        // which gload then bills directly (miss * hugepage), instead of a raw per-tile miss rate.
-        keys.push_back(hp > 0 ? a_addr / static_cast<int64_t>(hp) : a_key);
-        tkeys.push_back(a_key);
-        addrs.push_back(a_addr);
-        sizes.push_back(hp > 0 ? hp : a_tile);
-        tsizes.push_back(a_tile);
-        streams.push_back(0);
-        keys.push_back(hp > 0 ? b_addr / static_cast<int64_t>(hp) : b_key);
-        tkeys.push_back(b_key);
-        addrs.push_back(b_addr);
-        sizes.push_back(hp > 0 ? hp : b_tile);
-        tsizes.push_back(b_tile);
-        streams.push_back(1);
+        facc.push_back({a_addr, a_key, a_tile, 0, a_row + static_cast<int64_t>(k0 * a_tile),
+                       a_row + static_cast<int64_t>(k1 * a_tile), w == 0});
+        facc.push_back({b_addr, b_key, b_tile, 1, b_row + static_cast<int64_t>(k0 * b_tile),
+                       b_row + static_cast<int64_t>(k1 * b_tile), w == 0});
+        tkeys.push_back(a_key); addrs.push_back(a_addr); tsizes.push_back(a_tile); streams.push_back(0);
+        tkeys.push_back(b_key); addrs.push_back(b_addr); tsizes.push_back(b_tile); streams.push_back(1);
       }
     }
   }
@@ -384,10 +651,11 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   bool through_l1 = false;
   for (auto& [p, _] : paths)
     if (!hw.path_attr_bool(p, "smem_direct", true)) through_l1 = true;
-  cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 2, hw.l2_capacity_bytes(),
-                                                    n_part, lmap, policy, hp > 0);
-  auto mf = sim.miss_fraction();
-  double fa = mf[0], fb = mf[1];
+  FetchPlan fp = plan_fetch(hw, facc, 2, lmap, n_part, dma_buffer_cap(hw, tensor_class(bn_)));
+  const cache::SimResult& sim = fp.sim;
+  const std::vector<int64_t>& keys = fp.keys;
+  const std::vector<double>& sizes = fp.sizes;
+  double fa = fp.miss[0], fb = fp.miss[1];
 
   std::optional<cache::SimResult> l1_sim;
   double l1_miss_a = 0, l1_miss_b = 0;
@@ -431,13 +699,13 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   // the class has no buffer capacity to simulate at all.
   bool sram_is_static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
   auto buf_miss = [&](const std::string& klass, int stream) -> std::optional<double> {
-    double cap = hw.sram_capacity_for(klass);
+    double cap = trace_buffer_cap(hw, klass);
     if (cap <= 0 || sram_is_static_alloc) return std::nullopt;
     std::vector<int64_t> sk_, sa_;
     std::vector<double> ss_;
     std::vector<int> st_;
     for (size_t i = 0; i < keys.size(); ++i)
-      if (streams[i] == stream) { sk_.push_back(keys[i]); sa_.push_back(addrs[i]); ss_.push_back(sizes[i]); st_.push_back(0); }
+      if (fp.op_of[i] == stream) { sk_.push_back(keys[i]); sa_.push_back(addrs[i]); ss_.push_back(sizes[i]); st_.push_back(0); }
     if (sk_.empty()) return std::nullopt;
     std::vector<int> part1(sa_.size(), 0);
     cache::SimResult r = cache::simulate(sk_, sa_, ss_, st_, 1, cap, 1, part1, hw.get_str("memory.sram.policy", "lru"));
@@ -447,7 +715,7 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   bool has_sram = hw.has_sram();
   bool has_sa = false, has_sb = false;
   double sa = 0, sb = 0;
-  if (has_sram) {
+  if (has_sram && !fp.via_buffer) {
     // Same principle as attention's KV: capacity competes with whatever's concurrently resident
     // right now (stages-deep x one operand tile x concurrently-active blocks), not the whole
     // A/B matrix. Reuse across several M/N-tiles from that one resident copy is share_a/share_b's
@@ -468,8 +736,12 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   auto [mma_lane, mma_t] = hw.mma_cost(2.0 * bm_c * t.bn * t.bk, comp_dt);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a, occ_frac, hp));
-  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b, occ_frac, hp));
+  // (a cluster's blocks share one B fetch: the simulation already sees the second access as a hit)
+  const HbmFetch& fetch_b = fp.fetch[1];
+  body.push_back(gload(hw, "load:" + an, a_tile, fa, t.load_path, {}, has_sa, sa, has_l1_miss, l1_miss_a, occ_frac,
+                       fp.fetch[0]));
+  body.push_back(gload(hw, "load:" + bn_, b_tile / cl, fb, t.load_path, {}, has_sb, sb, has_l1_miss, l1_miss_b,
+                       occ_frac, fetch_b));
   {
     TraceAction mma;
     mma.name = "mma";
@@ -495,7 +767,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
     acc_a.work["cuda"] = hw.cuda_time_per_sm(2.0 * t.bm * t.bn);
     acc_a.latency = hw.unit_latency_s(hw.has_tmem() ? "tmem" : "cuda");
     epilogue.push_back(acc_a);
-    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0, occ_frac));
+    epilogue.push_back(gstore(sk == 1 ? "store:" + cn : "store:partials", out_bytes, {0}, 1.0, 0.0, occ_frac,
+                              sk == 1));
   }
 
   double useful = 2.0 * M * N * K * batch;
@@ -527,7 +800,8 @@ std::optional<std::vector<LoweredKernel>> lower_gemm(const HwView& hw, const std
   meta["occ_limiter"] = occ_lim; meta["regs_per_thread"] = rpt; meta["reg_spill_bytes"] = spill;
   meta["smem_per_block"] = static_cast<int64_t>(stages * stage + epi_smem);
   meta["l2_waves_simulated"] = n_waves; meta["l2_ksteps_simulated"] = ksteps;
-  meta["sim_coverage"] = win.coverage; meta["dma_hugepage_bytes"] = hp;
+  meta["sim_coverage"] = win.coverage;
+  fetch_meta(meta, fp);
   meta["stage_share"] = std::make_tuple(share_a, share_b);
   meta["l1_capacity_KB"] = hw.l1_capacity_bytes() / 1024.0;
   meta["l1_miss"] = has_l1_miss ? nb::cast(std::vector<double>{l1_miss_a, l1_miss_b}) : nb::none();
@@ -645,16 +919,16 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
   SimWindow win = sim_window(hw, static_cast<int64_t>(order.size()), conc, iters, 1);
   int64_t n_take = std::min<int64_t>(static_cast<int64_t>(order.size()), conc * win.waves);
   cache::AddrCfg lmap = l2_addr_cfg(hw);
-  double hp = hugepage_bytes(hw, lmap);
   double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
-  std::vector<int64_t> keys, addrs;
-  std::vector<double> sizes;
-  std::vector<int> streams;
   // The KV cache as it is laid out: [B][kv_heads][ntiles] tiles of tile_b bytes (one tile's K and
   // V adjacent). The GQA groups of one KV head read the very same tiles, so they share addresses
-  // and keys — that is the reuse this simulation is for. Replayed wave by wave, every split
+  // and keys — that is the reuse this simulation is for. Each split walks its own contiguous
+  // range of `iters` tiles (the stream a DMA fetches). Replayed wave by wave, every split
   // stepping through its tiles in lockstep, like lower_gemm's K loop.
   double tile_b = k_tile + v_tile;
+  int64_t kv_base = static_cast<int64_t>(addr_base(hw));
+  std::vector<FetchAcc> acc;
+  std::vector<int64_t> addrs;
   for (int64_t w = 0; w < win.waves; ++w) {
     int64_t lo = w * conc, hi = std::min<int64_t>(n_take, (w + 1) * conc);
     for (int64_t it = 0; it < win.ksteps; ++it)
@@ -663,27 +937,31 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
         (void)g;
         int64_t t_idx = s * iters + it;
         if (t_idx >= ntiles) continue;
-        int64_t tile_id = (b * kv_heads + h) * ntiles + t_idx;
-        int64_t addr = static_cast<int64_t>(tile_id * tile_b);
-        keys.push_back(hp > 0 ? addr / static_cast<int64_t>(hp) : tile_id);
+        int64_t row = (b * kv_heads + h) * ntiles;
+        int64_t tile_id = row + t_idx;
+        int64_t addr = kv_base + static_cast<int64_t>(tile_id * tile_b);
+        int64_t r_lo = kv_base + static_cast<int64_t>((row + s * iters) * tile_b);
+        int64_t r_hi = kv_base + static_cast<int64_t>((row + std::min<int64_t>(ntiles, (s + 1) * iters)) * tile_b);
+        acc.push_back({addr, tile_id, tile_b, 0, r_lo, r_hi, w == 0});
         addrs.push_back(addr);
-        sizes.push_back(hp > 0 ? hp : tile_b);
-        streams.push_back(0);
       }
   }
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
-  cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
-                                                    n_part, lmap, hw.get_str("memory.l2.policy", "lru"), hp > 0);
-  double f = sim.miss_fraction()[0];
-  // K and V are billed as separate gload calls but share one combined hugepage fetch above, so
-  // each gets its proportional share of that one page (they sum back to exactly one hugepage per
-  // real miss) -- the same proportionality to_memory*miss already gives the non-hugepage path.
+  FetchPlan fp = plan_fetch(hw, acc, 1, lmap, n_part, dma_buffer_cap(hw, "kv"));
+  const cache::SimResult& sim = fp.sim;
+  const std::vector<int64_t>& keys = fp.keys;
+  const std::vector<double>& sizes = fp.sizes;
+  std::vector<int> streams(keys.size(), 0);
+  double f = fp.miss[0];
+  // K and V are billed as separate gload calls but share one combined fetch above, so each gets
+  // its proportional share of it (they sum back to exactly the one fetch per real miss).
   double k_share = tile_b > 0 ? k_tile / tile_b : 0.0, v_share = tile_b > 0 ? v_tile / tile_b : 0.0;
+  auto share = [&](double x) { HbmFetch h = fp.fetch[0]; h.dma *= x; h.port *= x; return h; };
   bool has_fs = false;
   double fs = 0.0;
-  if (hw.has_sram()) {
+  if (hw.has_sram() && !fp.via_buffer) {
     bool sram_is_static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
-    double cap = hw.sram_capacity_for("kv");
+    double cap = trace_buffer_cap(hw, "kv");
     std::optional<double> kv_miss;
     if (cap > 0 && !sram_is_static_alloc && !keys.empty()) {
       // Same real tile-keyed LRU trace as lower_gemm's buf_miss, over the same combined K+V
@@ -713,11 +991,11 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
 
   std::vector<TraceAction> body;
   body.push_back(gload(hw, v_in_k ? "load:kv_cache(latent)" : "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs,
-                       false, 0.0, occ_frac, hp * k_share));
+                       false, 0.0, occ_frac, share(k_share)));
   int iv = 0;
   if (!v_in_k) {
     body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0,
-                         occ_frac, hp * v_share));
+                         occ_frac, share(v_share)));
     iv = 1;
   }
   {
@@ -757,7 +1035,8 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
     o_read.name = "o_read";
     o_read.work["tmem"] = hw.tmem_time_per_sm(hb * d_v * 4.0, 0.0);
     epilogue.push_back(o_read);
-    epilogue.push_back(gstore(splits == 1 ? "store:out" : "store:partials", hb * d_v * out_b, {0}, 1.0, 0.0));
+    epilogue.push_back(gstore(splits == 1 ? "store:out" : "store:partials", hb * d_v * out_b, {0}, 1.0, 0.0, 1.0,
+                              splits == 1));
   }
 
   double kv_bytes = B * kv_heads * S * (d_qk + (v_in_k ? 0 : d_v)) * kvb;
@@ -783,7 +1062,8 @@ std::optional<std::vector<LoweredKernel>> lower_attention_decode(
   meta["regs_per_thread"] = rpt; meta["reg_spill_bytes"] = spill;
   meta["smem_per_block"] = static_cast<int64_t>(smem);
   meta["l2_hit_rate"] = sim.hit_rate; meta["l2_partitions"] = n_part;
-  meta["sim_coverage"] = win.coverage; meta["dma_hugepage_bytes"] = hp;
+  meta["sim_coverage"] = win.coverage;
+  fetch_meta(meta, fp);
   meta["flops"] = 2.0 * B * H * S * (d_qk + d_v); meta["kv_bytes"] = kv_bytes; meta["l2_miss_KV"] = f;
   meta["splits"] = splits;
 
@@ -838,14 +1118,15 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   int64_t qpk = std::max<int64_t>(1, H / std::max<int64_t>(1, kv_heads));
   int64_t kv_tiles = (S + bn - 1) / bn;
   cache::AddrCfg lmap = l2_addr_cfg(hw);
-  double hp = hugepage_bytes(hw, lmap);
   double occ_frac = slice_bw_frac(lmap.ports, concurrent_blocks);
-  std::vector<int64_t> keys, addrs;
-  std::vector<double> sizes;
-  std::vector<int> streams;
   // The KV cache as laid out: [B][kv_heads][kv_tiles], each tile's K then V. Every query tile of a
   // head (and every head of a GQA group) walks the same KV tiles, so they share addresses/keys;
-  // replayed wave by wave, all blocks stepping through their KV tiles in lockstep.
+  // a block's stream is the contiguous KV range [first, first + its iters) it walks. Replayed
+  // wave by wave, all blocks stepping through their KV tiles in lockstep.
+  double kv_total = k_tile + v_tile;
+  int64_t kv_base = static_cast<int64_t>(addr_base(hw));
+  std::vector<FetchAcc> acc;
+  std::vector<int64_t> addrs;
   for (int64_t w = 0; w < win.waves; ++w) {
     int64_t lo_i = w * conc, hi_i = std::min<int64_t>(n_take, (w + 1) * conc);
     for (int64_t it = 0; it < win.ksteps; ++it)
@@ -853,32 +1134,32 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
         auto [b, h, q] = order[idx];
         if (it >= iters_list[q]) continue;
         int64_t first = window > 0 ? std::max<int64_t>(0, q * bm - window + 1) / bn : 0;
-        int64_t tile_id = (b * kv_heads + h / qpk) * kv_tiles + std::min<int64_t>(first + it, kv_tiles - 1);
-        int64_t k_addr = static_cast<int64_t>(tile_id * (k_tile + v_tile));
+        int64_t row = (b * kv_heads + h / qpk) * kv_tiles;
+        int64_t tile_id = row + std::min<int64_t>(first + it, kv_tiles - 1);
+        int64_t k_addr = kv_base + static_cast<int64_t>(tile_id * kv_total);
         int64_t v_addr = k_addr + static_cast<int64_t>(k_tile);
-        keys.push_back(hp > 0 ? k_addr / static_cast<int64_t>(hp) : tile_id * 2);
+        int64_t r_lo = kv_base + static_cast<int64_t>((row + first) * kv_total);
+        int64_t r_hi = kv_base + static_cast<int64_t>((row + std::min<int64_t>(kv_tiles, first + iters_list[q])) * kv_total);
+        acc.push_back({k_addr, tile_id * 2, k_tile, 0, r_lo, r_hi, w == 0});
+        acc.push_back({v_addr, tile_id * 2 + 1, v_tile, 1, r_lo, r_hi, w == 0});
         addrs.push_back(k_addr);
-        sizes.push_back(hp > 0 ? hp : k_tile);
-        streams.push_back(0);
-        keys.push_back(hp > 0 ? v_addr / static_cast<int64_t>(hp) : tile_id * 2 + 1);
         addrs.push_back(v_addr);
-        sizes.push_back(hp > 0 ? hp : v_tile);
-        streams.push_back(0);
       }
   }
   int n_part = static_cast<int>(hw.get_num("memory.l2.partitions", 1.0));
-  cache::SimResult sim = memory_slice::simulate_l2(keys, addrs, sizes, streams, 1, hw.l2_capacity_bytes(),
-                                                    n_part, lmap, hw.get_str("memory.l2.policy", "lru"), hp > 0);
-  double f = sim.miss_fraction()[0];
-  // K and V are billed as separate gload calls but share one combined stream above; give each its
-  // proportional share of one hugepage fetch (same reasoning as lower_attention_decode).
-  double kv_total = k_tile + v_tile;
-  double k_share = kv_total > 0 ? k_tile / kv_total : 0.0, v_share = kv_total > 0 ? v_tile / kv_total : 0.0;
+  FetchPlan fp = plan_fetch(hw, acc, 2, lmap, n_part, dma_buffer_cap(hw, "kv"));
+  const cache::SimResult& sim = fp.sim;
+  const std::vector<int64_t>& keys = fp.keys;
+  const std::vector<double>& sizes = fp.sizes;
+  std::vector<int> streams(keys.size(), 0);
+  double f = (fp.sim.misses[0] + fp.sim.misses[1] + fp.sim.misses[2] + fp.sim.misses[3]) /
+             std::max<double>(1.0, static_cast<double>(fp.sim.accesses[0] + fp.sim.accesses[1] +
+                                                        fp.sim.accesses[2] + fp.sim.accesses[3]));
   bool has_fs = false;
   double fs = 0.0;
-  if (hw.has_sram()) {
+  if (hw.has_sram() && !fp.via_buffer) {
     bool sram_is_static_alloc = !hw.get("memory.sram.alloc").is_none() || !hw.get("memory.sram.pin").is_none();
-    double cap = hw.sram_capacity_for("kv");
+    double cap = trace_buffer_cap(hw, "kv");
     std::optional<double> kv_miss;
     if (cap > 0 && !sram_is_static_alloc && !keys.empty()) {
       // Same real tile-keyed LRU trace as lower_gemm's buf_miss, over the same combined K+V
@@ -905,10 +1186,10 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   auto [pv_lane, pv_t] = hw.mma_cost(2.0 * bm_c * bn * d_v, compute_dtype);
 
   std::vector<TraceAction> body;
-  body.push_back(gload(hw, "load:kv_cache(K)", k_tile, f, "tma", {}, has_fs, fs, false, 0.0,
-                       occ_frac, hp * k_share));
-  body.push_back(gload(hw, "load:kv_cache(V)", v_tile, f, "tma", {}, has_fs, fs, false, 0.0,
-                       occ_frac, hp * v_share));
+  body.push_back(gload(hw, "load:kv_cache(K)", k_tile, fp.miss[0], "tma", {}, has_fs, fs, false, 0.0,
+                       occ_frac, fp.fetch[0]));
+  body.push_back(gload(hw, "load:kv_cache(V)", v_tile, fp.miss[1], "tma", {}, has_fs, fs, false, 0.0,
+                       occ_frac, fp.fetch[1]));
   {
     TraceAction qk;
     qk.name = "gemm_qk";
@@ -944,7 +1225,7 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
     o_read.name = "o_read";
     o_read.work["tmem"] = hw.tmem_time_per_sm(bm * d_v * 4.0, 0.0);
     epilogue.push_back(o_read);
-    epilogue.push_back(gstore("store:out", bm * d_v * 2.0, {0}, 1.0, 0.0));
+    epilogue.push_back(gstore("store:out", bm * d_v * 2.0, {0}, 1.0, 0.0, 1.0, true));
   }
 
   int64_t pairs = 0;
@@ -975,7 +1256,8 @@ std::optional<std::vector<LoweredKernel>> lower_attention_prefill(
   meta["regs_per_thread"] = rpt; meta["reg_spill_bytes"] = spill;
   meta["smem_per_block"] = static_cast<int64_t>(smem);
   meta["l2_hit_rate"] = sim.hit_rate; meta["l2_partitions"] = n_part;
-  meta["sim_coverage"] = win.coverage; meta["dma_hugepage_bytes"] = hp;
+  meta["sim_coverage"] = win.coverage;
+  fetch_meta(meta, fp);
   meta["flops"] = 2.0 * B * H * pairs * (d_qk + d_v); meta["l2_miss_KV"] = f;
   std::ostringstream tile_s2;
   tile_s2 << bm << "x" << bn << "/s" << tile.stages << "/sp" << tile.num_splits << "/c" << tile.consumers;

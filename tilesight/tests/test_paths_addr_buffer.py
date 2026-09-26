@@ -80,9 +80,10 @@ def test_l2_vs_buffer_trade_needs_a_big_buffer():
     rc = RunConfig(phase="decode", batch=64, seq_len=4096, dp=8)
     rows = l2_tradeoff(m, HW, rc, 126, buffer_shares=(0.0, 0.9), policy="pin",
                        pin={"weight": 1.0}, bypass_l2=True, prefetch=True)
-    # at an L2-sized budget, trading L2 away for a buffer loses: L2 still carries every load
+    # at an L2-sized budget, trading L2 away for a buffer loses: a pinned buffer is not the DMA
+    # destination, so the matrix DMAs still go through the (now small) L2 and bind there
     assert rows[-1]["step_ms"] > rows[0]["step_ms"]
-    assert rows[-1]["top_bound"].startswith("l2")
+    assert rows[-1]["top_bound"].startswith(("l2", "dma"))
 
 
 def test_shared_buffer_uses_a_real_lru_trace_pinned_buffer_stays_closed_form():
@@ -111,7 +112,9 @@ def test_shared_buffer_uses_a_real_lru_trace_pinned_buffer_stays_closed_form():
     small = ddr_of(with_buffer(HW, 1, policy="cache"))
     big = ddr_of(with_buffer(HW, 256, policy="cache"))
     plain = ddr_of(HW.override({"memory.sram": None}) if False else HW)
-    assert big <= small <= plain
+    # (a 1 MB buffer as the DMA destination is worse than no buffer at all -- it holds far less
+    # than the 132 MB L2 the DMA would otherwise land in -- so only capacity monotonicity holds)
+    assert big <= small and big <= plain
 
     # Pinned 100% to weight with ample capacity: still the old closed-form full-residency case
     # (zero leftover DDR for that operand), unaffected by the shared-buffer trace above.
@@ -243,38 +246,102 @@ def test_l2_blocks_and_outstanding_limits_are_enforced():
     assert a > b
 
 
-def test_dma_engines_cap_ddr_bandwidth_when_hugepages_are_discrete():
-    """memory.dma.engines and memory.outstanding.dma_per_engine_lines were pure unused config
-    until now ("recorded; not yet a cap"). With a hugepage configured, a DMA moves a discrete unit
-    per operation, so "how many can be in flight at once" becomes a real, countable concurrency
-    limit -- the same Little's-law shape as outstanding_cap's generic per-SM cache-line limit,
-    just for engines instead of per-SM lines: `engines x dma_per_engine_lines x hugepage_bytes /
-    DDR latency`. A DMA engine is not tied to a memory slice -- it can move data from any HBM
-    channel to any slice -- so `engines` is a flat GPU-wide count, never per-slice. Both knobs
-    default to leaving the aggregate configured bandwidth untouched, so no existing preset changes
-    behavior."""
-    hp = {"memory.dma.hugepage_KB": 2048}
+def test_dma_and_l2_port_lanes_share_hbm():
+    """HBM (`ddr`) is one pool that two engines draw from, each with its own ceiling lane:
+    the DMA engines (`dma` = engines x port_bytes x clock, no outstanding entries: a DMA moves a
+    contiguous range into space reserved up front) and the L2 ports (`l2port`, Little's law over
+    the outstanding entries shared by reads and writes: an op_bytes request takes
+    ceil(op_bytes / width) entries -- rounded up -- for ddr_entry_cycles)."""
+    lanes = {l.name: l for l in HW.lanes()}
+    clk = HW.clock_hz
+    assert lanes["dma"].total_rate == pytest.approx(16 * 128 * clk)                  # 16 DMA ports x 128 B
+    # 16 L2 ports, 128 entries of 64 B, 256 B op -> 4 entries -> 32 requests in flight each
+    assert lanes["l2port"].total_rate == pytest.approx(min(16 * 64 * clk, 16 * 32 * 256 * clk / 300))
+    # a request that isn't a whole number of port beats rounds its entries up: 256 B over a
+    # 96 B port = 3 entries -> floor(128 / 3) = 42 requests
+    odd = HW.override({"memory.l2.ddr_port_bytes_per_clk": 96})
+    assert odd.l2port_rate() == pytest.approx(min(16 * 96 * clk, 16 * 42 * 256 * clk / 300))
+    # more DMA engines -> a faster DMA-bound kernel, up to the shared HBM ceiling
+    t = TileConfig(bm=64, bn=64, bk=128)
+    few, many = HW.override({"memory.dma.engines": 4}), HW.override({"memory.dma.engines": 64})
+    kf = _lower_gemm(few, 64, 16384, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
+    km = _lower_gemm(many, 64, 16384, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
+    rf, rm = evaluate(kf, few), evaluate(km, many)
+    assert rf.bottleneck == "dma" and rm.time_s < rf.time_s
+    # both engines also charge the shared HBM lane: ddr = dma + l2port on every load
+    for a in kf.trace.body:
+        if a.name.startswith("load"):
+            assert a.work["ddr"] == pytest.approx(a.work["dma"] + a.work["l2port"])
 
-    # Unset (either knob left at 0) -> no cap at all, whatever the other is.
-    base_rate = {l.name: l for l in HW.lanes()}["ddr"].total_rate
-    assert HW.dma_engine_limited_rate(base_rate) == base_rate
-    assert HW.override(hp).dma_engine_limited_rate(base_rate) == base_rate            # lines unset
-    assert HW.override({"memory.outstanding.dma_per_engine_lines": 1}) \
-             .dma_engine_limited_rate(base_rate) == base_rate                          # hugepage unset
 
-    # Both set: a real, computable Little's-law cap, monotonic in engines and lines.
-    one = HW.override({**hp, "memory.dma.engines": 1, "memory.outstanding.dma_per_engine_lines": 1})
-    eight = one.override({"memory.dma.engines": 8})
-    assert one.dma_engine_limited_rate(base_rate) < eight.dma_engine_limited_rate(base_rate) <= base_rate
-    expected_one = 1 * 1 * 2048 * 1024 / one.unit_latency_s("ddr")
-    assert abs(one.dma_engine_limited_rate(base_rate) - expected_one) < 1.0
+def test_l2_op_bytes_must_divide_the_interleave_granularity():
+    bad = HW.override({"memory.l2.op_bytes": 384})          # 1 KB stripes / 384 B does not divide
+    with pytest.raises(ValueError):
+        bad.lanes()
+    with pytest.raises(ValueError):
+        _lower_gemm(bad, 1024, 1024, 1024)
+    HW.override({"memory.l2.op_bytes": 64}).lanes()       # smaller is fine as long as it divides
 
-    # Feeds through to the actual "ddr" lane, and a tighter cap really does slow a ddr-bound kernel.
-    lim = one.lanes()
-    assert {l.name: l for l in lim}["ddr"].total_rate == pytest.approx(one.dma_engine_limited_rate(base_rate))
-    slow_k = _lower_gemm(one, 16384, 16384, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8")
-    fast_k = _lower_gemm(eight, 16384, 16384, 7168, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8")
-    assert evaluate(slow_k[0], one).time_s > evaluate(fast_k[0], eight).time_s
+
+def _decode(hw, mode=None):
+    if mode:
+        hw = hw.override({"memory.dma.fetch_mode": mode})
+    t = _core.AttnTile(block_m=64, block_n=64, stages=2)
+    k = _core.lower_attention_decode(hw, "a", 32, 16, 1, 8192, 576, 512, "bf16", "bf16", True, t)[0]
+    tot = {lane: sum(a.work.get(lane, 0) for a in k.trace.body) * k.trace.iters * k.trace.num_blocks
+           for lane in ("ddr", "dma", "l2port", "sram")}
+    return k, evaluate(k, hw), tot
+
+
+def test_fetch_modes_route_matrix_operands_to_the_right_engine():
+    """memory.dma.fetch_mode: how matrix operands (K/V, GEMM A/B) come in from HBM.
+    Kimi-K2-like decode MLA, 32 sequences x 8192 tokens of 576 bf16 latent = 302 MB of KV."""
+    k0, _, _ = _decode(HW)
+    kv = k0.meta["kv_bytes"]
+    assert k0.meta["fetch_mode"] == "dma_smart"            # auto without a buffer
+    # dma_smart: DMA only, chunks sized so two per concurrent stream fit L2, multiples of 128 B,
+    # aligned to the stream's own start -> HBM bytes ~= the KV actually needed
+    _, r_s, smart = _decode(HW, "dma_smart")
+    chunk = k0.meta["dma_chunk_bytes"][0]
+    assert chunk % 128 == 0 and chunk <= HW.l2_capacity_bytes / (2 * k0.meta["fetch_streams"])
+    assert smart["l2port"] == 0 and smart["dma"] == pytest.approx(kv, rel=0.03)
+    # l2_port: the same bytes (tile rounded up to op_bytes), all through the L2 ports -> slower
+    _, r_p, port = _decode(HW, "l2_port")
+    assert port["dma"] == 0 and port["l2port"] == pytest.approx(kv, rel=0.03)
+    assert r_p.bottleneck == "l2port" and r_p.time_s > r_s.time_s
+    # dma_page: whole 2 MB pages into a 132 MB L2 for ~150 concurrent streams -> thrash
+    _, r_g, page = _decode(HW, "dma_page")
+    assert page["l2port"] == 0 and page["dma"] > 5 * kv and r_g.time_s > 5 * r_s.time_s
+    # dma_page_tail_l2: a split's KV range (~1.9 MB) never covers a whole page -> all L2 ports
+    _, _, tail = _decode(HW, "dma_page_tail_l2")
+    assert tail["dma"] == 0 and tail["l2port"] == pytest.approx(port["l2port"])
+    # ... while a long range is mostly pages with only the ends through the L2 ports
+    t = TileConfig(bm=128, bn=128, bk=128)
+    g = _lower_gemm(HW.override({"memory.dma.fetch_mode": "dma_page_tail_l2"}), 128, 128, 66560,
+                    a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
+    # B strip: 128 x 66560 fp8 = 8.1 MB, not page-aligned -> 3 whole pages + two partial ends
+    dma, port = g.meta["hbm_dma_bytes_per_load"][1], g.meta["hbm_port_bytes_per_load"][1]
+    assert dma > 0 and port > 0 and dma > 2 * port
+    w = g.trace.body[1].work
+    assert w["dma"] > 0 and w["l2port"] > 0
+
+
+def test_b200_with_buffer_holds_whole_pages_that_l2_thrashes_on():
+    """B200 has no buffer. A B200 with one (buffer = 4x the L2, L2 cut to 1/4) is the case the
+    buffer exists for: DMA pages land in the buffer, which can hold one per concurrent stream,
+    instead of in a hardware-managed L2 that evicts them before their stream is done."""
+    b200 = HardwareSpec.load("b200")
+    assert b200.sram is None
+    l2 = b200.get("memory.l2.capacity_MB")
+    buf = b200.override({"memory.l2.capacity_MB": l2 / 4, "memory.sram.capacity_MB": l2 * 4,
+                         "memory.sram.bandwidth_TBps": 20.5, "memory.sram.latency_ns": 400})
+    k_b, r_b, t_b = _decode(buf)
+    kv = k_b.meta["kv_bytes"]
+    assert k_b.meta["fetch_mode"] == "dma_page" and k_b.meta["dma_to_buffer"]   # auto with a buffer
+    assert t_b["dma"] == pytest.approx(kv, rel=0.03)       # every page fetched once
+    assert t_b["sram"] == pytest.approx(kv, rel=0.03)      # and read out of the buffer
+    _, r_n, t_n = _decode(b200, "dma_page")                # same pages, no buffer: L2 thrashes
+    assert t_n["dma"] > 5 * kv and r_n.time_s > 5 * r_b.time_s
 
 
 def test_l2_ddr_bandwidth_is_capped_by_memory_slices():
@@ -286,8 +353,10 @@ def test_l2_ddr_bandwidth_is_capped_by_memory_slices():
     t = TileConfig(bm=128, bn=128, bk=64)
 
     def kernel(n_ports):
+        # the occupancy proxy applies to L2-port traffic (a DMA page/chunk spans every slice)
         hw = HW.override({"memory.addressing.l2": {"ports": n_ports, "mode": "interleave",
-                                                    "granularity_KB": 1}})
+                                                    "granularity_KB": 1},
+                          "memory.dma.fetch_mode": "l2_port"})
         k = _lower_gemm(hw, 512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=t)[0]
         return hw, k
 
@@ -331,13 +400,15 @@ def test_dma_hugepage_keys_the_l2_simulation_instead_of_rounding_after_the_fact(
     # A hugepage that doesn't divide evenly by ports x granularity is padded up, not rejected:
     # 24KB / 16KB unit = 1.5 -> padded to 2 units = 32KB.
     odd_addr = {"ports": 12, "mode": "interleave", "granularity_KB": 1}   # 2048/12 doesn't divide evenly
-    k_odd = _lower_gemm(HW.override({"memory.addressing.l2": odd_addr, "memory.dma.hugepage_KB": 2048}),
+    k_odd = _lower_gemm(HW.override({"memory.addressing.l2": odd_addr, "memory.dma.hugepage_KB": 2048,
+                                     "memory.dma.fetch_mode": "dma_page"}),
                         512, 512, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8",
                         tile=TileConfig(bm=256, bn=128, bk=64))[0]
     assert k_odd.trace.body[0].work["ddr"] == pytest.approx(k_odd.meta["l2_miss_A"] * 171 * 12 * 1024)
 
     big_tile = TileConfig(bm=128, bn=256, bk=64, cluster_m=2, cta_pair=True)
-    hw = HW.override({"memory.addressing.l2": valid_addr, "memory.dma.hugepage_KB": 2048})
+    hw = HW.override({"memory.addressing.l2": valid_addr, "memory.dma.hugepage_KB": 2048,
+                      "memory.dma.fetch_mode": "dma_page"})
     k = _lower_gemm(hw, 8192, 8192, 8192, a_dtype="fp8", b_dtype="fp8", compute_dtype="fp8", tile=big_tile)[0]
 
     # DDR work is exactly miss * hugepage_bytes now, not a per-call rounding of raw tile bytes.
@@ -410,6 +481,8 @@ def test_collectives_go_hierarchical_outside_the_fast_domain():
 
 
 def test_l2_is_simulated_deterministically_per_partition():
+    # tile atoms (l2_port): a DMA page/chunk is sharded over every partition by construction
+    HW = HardwareSpec.load("b300").override({"memory.dma.fetch_mode": "l2_port"})
     k = _k(HW)
     assert k.meta["l2_partitions"] == HW.get("memory.l2.partitions")
     assert 0 <= k.meta["l2_hit_rate"] <= 1

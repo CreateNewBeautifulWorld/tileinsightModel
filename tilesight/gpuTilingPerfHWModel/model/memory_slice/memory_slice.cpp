@@ -11,12 +11,12 @@ cache::SimResult simulate_l2(const std::vector<int64_t>& keys, const std::vector
                              const std::vector<double>& sizes, const std::vector<int>& streams,
                              int n_streams, double l2_capacity_bytes, int n_partitions,
                              const cache::AddrCfg& l2_addr_cfg, const std::string& policy,
-                             bool page_fill) {
+                             bool page_fill, const std::vector<char>* fill_mask) {
   std::vector<int> part_of(addrs.size());
   for (size_t i = 0; i < addrs.size(); ++i)
     part_of[i] = static_cast<int>(cache::port_of(l2_addr_cfg, addrs[i]));
   return cache::simulate(keys, addrs, sizes, streams, n_streams, l2_capacity_bytes, n_partitions, part_of,
-                         policy, page_fill);
+                         policy, page_fill, fill_mask);
 }
 
 }  // namespace tilesight::memory_slice

@@ -22,6 +22,7 @@ Kernel = _core.LoweredKernel
 
 LANE_COLOR = {"tc": "#b4552d", "cuda": "#6b8f9c", "sfu": "#8a6fb0", "smem": "#5b9279",
               "tmem": "#c2903a", "l2": "#4f7cac", "ddr": "#b3563a", "sram": "#7f9a52",
+              "dma": "#9c4a6b", "l2port": "#3f8f8f",
               "net": "#7a7a7a"}
 
 
@@ -34,7 +35,7 @@ def _panel_d(k: Kernel, tl: dict) -> str:
     rows = []
     for i, a in enumerate(k.trace.body):
         cells = "".join(
-            f'<td class="num">{(a.work.get(l, 0) * 1e9):.1f}</td>' if not l.startswith(("l2", "ddr", "sram"))
+            f'<td class="num">{(a.work.get(l, 0) * 1e9):.1f}</td>' if not l.startswith(("l2", "ddr", "sram", "dma"))
             else f'<td class="num">{a.work.get(l, 0) / 1024:.1f} KB</td>' for l in lanes)
         deps = ", ".join(k.trace.body[d].name for d in a.deps) or "—"
         rows.append(f'<tr><td class="mono">{html.escape(a.name)}</td>{cells}'

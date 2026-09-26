@@ -284,35 +284,93 @@ preset and chasing the failures:
   ~42 KB L1, so reusing the page-keyed trace for it silently switched L1 off. `lower_gemm` keeps a
   tile-keyed copy of the access stream (`tkeys`/`tsizes`) for L1.
 
-**Open: why this is not the default yet.** With every fix above, one case still disagrees with
-measured hardware by an order of magnitude: long-context decode attention (Kimi-K2, batch 256, seq
-8192, dp 8) goes 57 µs -> 1137 µs, 91% KV miss. ~320 concurrent blocks each stream their own KV
-page and stay in it for ~26 steps of 73 KB; "a DMA always moves the whole 2 MB page" then needs
-320 x 2 MB = 640 MB resident at once against a 132 MB L2, so LRU thrashes and nearly every 73 KB
-step refetches 2 MB. Real decode-MLA kernels read KV at ~90% of HBM bandwidth, so the literal
-"every DMA transfer is 2 MB" reading does not hold for streaming tile loads; 2 MB is at least the
-allocation / address-translation granularity. Until that is settled, `hugepage_KB` defaults to 0.
+**The decode thrash, and why pages are now on by default.** In pure page mode, long-context
+decode attention (Kimi-K2, batch 256, seq 8192, dp 8) thrashes: every split streams its own KV
+range, 148–320 concurrent streams x 2 MB pages > a 132 MB L2, so LRU evicts a page before its
+stream has finished it and nearly every tile step refetches 2 MB. That is not a bug of the trace —
+it is what "every DMA is a whole 2 MB page into L2" really costs. It is resolved by making *how* a
+matrix operand comes in a GPU config choice (below) and by giving page mode a destination that can
+hold every stream's page: the on-chip buffer.
 
-The shared on-chip buffer's residency (§4's "on-chip buffer's residency" above) uses this same
-hugepage-keyed trace now too, not just L2/gload. **Still deliberately out of scope**: Z-order/
-blocked tile addressing, so a 2-D tile's bytes are contiguous for hugepage-alignment purposes
-instead of the plain row-major layout `common/cache/address_map` assumes today.
+### 4c. HBM fetch paths: DMA engines vs. L2 ports (`memory.dma.fetch_mode`)
 
-**DMA engine concurrency (`memory.dma.engines` / `memory.outstanding.dma_per_engine_lines`).**
-These two fields existed in the schema but were pure dead config — `dma_per_engine_lines` was even
-commented "recorded; not yet a cap". With a hugepage configured, a DMA moves one discrete unit per
-operation, which makes "how many can be in flight at once" a real, countable concurrency question
-for the first time — the same Little's-law shape `HardwareSpec.outstanding_cap` already uses for
-generic per-SM cache lines, just for DMA engines instead:
-`HardwareSpec.dma_engine_limited_rate(configured) = min(configured, engines ×
-dma_per_engine_lines × hugepage_bytes / DDR latency)`. A DMA engine is not tied to a memory slice
-— it can move data from any HBM channel to any slice — so `engines` is a flat GPU-wide count, never
-per-slice. This caps the `ddr` lane's `total_rate` in `HardwareSpec.lanes()` directly — no C++
-engine changes needed, since lanes are already GPU-config data the round-time formula consumes
-generically. Both knobs default to 0 (`dma_per_engine_lines`) so this changes no existing preset's
-behavior unless explicitly
-calibrated in. See
-`tests/test_paths_addr_buffer.py::test_dma_engines_cap_ddr_bandwidth_when_hugepages_are_discrete`.
+HBM (`ddr` lane) is one bandwidth pool shared by two engines, each with its own ceiling lane:
+
+| lane | who uses it | rate |
+|---|---|---|
+| `dma` | matrix operands (GEMM A/B, attention K/V), per `fetch_mode` | `memory.dma.engines x memory.dma.port_bytes x clock` (default 16 x 128 B) — a DMA moves a contiguous range into space reserved up front, so it needs no outstanding entries |
+| `l2port` | everything else (Q, activations, elementwise) + all write-back | `min(ports x ddr_port_bytes_per_clk x clock, ports x floor(ddr_outstanding / ceil(op_bytes / width)) x op_bytes / (ddr_entry_cycles / clock))` |
+| `ddr` | both (sum) | HBM bandwidth |
+
+`l2port` is Little's law on the L2 ports' outstanding entries, shared by reads and writes: one
+entry covers one port width (64 B), an `op_bytes` request (256 B) takes `ceil(256/64) = 4`
+entries and holds them `ddr_entry_cycles` (300); 128 entries per port = 32 requests in flight.
+`ports` = `memory.l2.ddr_ports`, 0 = one per `memory.addressing.l2` port. With B300 defaults: DMA
+16 x 128 B x 1.9 GHz = 3.9 TB/s, L2 ports 16 x 32 x 256 B / 158 ns = 0.83 TB/s, HBM 8 TB/s x eff.
+So with 16 DMA engines the DMA path alone cannot fill HBM; more engines can. A miss also pays the
+path's fill latency (`memory.dma.fill_latency_cycles` 8 per 128 B beat, `memory.l2.
+ddr_fill_latency_cycles` 16 per 64 B beat) on top of the DDR latency.
+
+`memory.l2.op_bytes` is the L2 operation = eviction granularity (default 256 B). It has to divide
+the L2 interleave stripe (`memory.addressing.l2.granularity_KB`) or one op would straddle two
+slices — asserted in both `HardwareSpec.l2_op_bytes()` and `gpu_top.cpp::l2_op_bytes()`. An
+L2-port fetch of a tile is rounded up to it.
+
+`plan_fetch()` (`gpu_top.cpp`) turns the kernel's real access trace into fetch atoms and runs
+the L2 simulation on them. Every access carries its **stream's needed range** — the contiguous
+bytes one block walks over its K loop (a GEMM block's A row strip and B column strip, with A laid
+out `[batch][M-tile][K-tile]` and B `[batch][N-tile][K-tile]`, K contiguous like an nn.Linear
+weight; a decode split's KV range; a prefill query tile's KV window). Modes:
+
+| mode | atom of a miss | engine |
+|---|---|---|
+| `dma_page` | the whole padded page (`hugepage_KB`, default 2 MB) | DMA |
+| `dma_page_tail_l2` | pages fully inside the stream's range: page; the partial page at either end: the tile, rounded up to `op_bytes` | DMA / L2 port |
+| `l2_port` | the tile rounded up to `op_bytes` | L2 port |
+| `dma_smart` | a chunk `c` = largest multiple of `dma.port_bytes` with `c <= page`, `c <= the stream's range`, and `c <= destination capacity / concurrent streams` (so one chunk per stream fits); never below one tile | DMA |
+| `auto` (default) | `dma_page` when the DMA lands in a shared on-chip buffer that holds one page per concurrent stream, `dma_smart` otherwise (no buffer, too small a buffer, or a `pin`/`alloc`/`stage` buffer, which keep their closed-form model and DMA via L2) | |
+
+Concurrent streams = distinct needed ranges in the first wave. The destination is the buffer
+when there is one, else L2. DMA atoms are sharded over every L2 partition (`page_fill`, a
+per-access `fill_mask`); L2-port tiles stay whole in the partition their address maps to. The
+simulation's per-(operand, engine) misses x atom bytes / loads gives each `gload` its HBM bytes
+per load on each engine (`HbmFetch`), which the on-chip buffer's hit fraction then reduces.
+
+**The buffer.** DMA'd pages land in the buffer when one exists; unlike L2 it holds a page until
+its streams are done with it. Its in-kernel trace (L1-style LRU over the same atoms) uses the
+**whole** buffer capacity for a shared buffer: the trace replays from cold and the running kernel's
+streams are the only ones being touched, so the footprint split (`sram_capacity_for`, which is
+about what stays resident *between* kernels) does not apply inside the trace; a static
+`alloc`/`pin` share still does (`trace_buffer_cap`).
+
+**Measured (Kimi-K2 decode, batch 256, seq 8192, dp 8, whole step; attention in brackets):**
+
+| config | step |
+|---|---|
+| B300, before this change (tile-granular, DDR 8 TB/s only) | 36.8 ms |
+| B300, `dma_smart` (default) | 57.1 ms (attn 9.4) — `dma`-bound: 16 DMA engines = 3.9 TB/s < HBM |
+| B300, `dma_page` | 196.7 ms (attn 126.6) — KV page thrash in a 132 MB L2 |
+| B300, `l2_port` / `dma_page_tail_l2` | 209.5 ms (attn 26.9) — `l2port`-bound (0.83 TB/s); a split's KV range and an expert's weight strip are < 2 MB, so tail mode sends them all through the L2 ports |
+| B200, `dma_smart` | 60.9 ms (attn 11.5) |
+| B200, `dma_page` | 219.4 ms (attn 148.4) |
+| B200 + buffer (buffer = 4 x L2 = 504 MB, L2 = L2/4 = 31.5 MB), `auto` -> `dma_page` into the buffer | 61.0 ms (attn 11.5) — every page fetched exactly once |
+
+Whole 2 MB pages only work when the destination holds one per concurrent stream: a small,
+hardware-managed L2 cannot (it evicts a page before its stream is done), a large buffer can — with
+it, page mode reaches the same compulsory traffic as the smart DMA. At the single-kernel level
+(`test_b200_with_buffer_holds_whole_pages_that_l2_thrashes_on`): 2 MB pages into B200's L2 move
+7.3 GB for 302 MB of KV; into the buffer, 307 MB. Smart chunks are aligned to the stream's own
+start and trimmed to its end, so they too move exactly the needed bytes. Prefill on B300 goes
+345 ms -> 552 ms, mostly elementwise activation traffic limited by the L2 ports' outstanding
+entries (`l2port`). Matrix outputs (GEMM C, attention O) are written back by DMA; elementwise
+outputs and split partials through the L2 ports.
+
+All trace addresses start at `memory.addressing.base` (default 0x8000_0000, 2 MB-aligned), and so
+do the memory map and the CLI address dumps.
+
+See
+`tests/test_paths_addr_buffer.py` (`test_fetch_modes_*`, `test_l2_op_bytes_*`,
+`test_b200_with_buffer_*`).
 
 ## 5. Kernel lowerings
 ### 5.1 GEMM (`model/gpu_top/gpu_top.cpp`, `lower_gemm`)
